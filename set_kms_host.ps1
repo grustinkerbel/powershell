@@ -2,6 +2,27 @@
 .SYNOPSIS
     Sets the Windows KMS server, optionally activates Windows, reports the current KMS host,
     or outputs the full KMS report for debugging.
+
+.PARAMETER ComputerName
+    Run the command on a single computer.
+
+.PARAMETER ComputerList
+    Path to a text file containing one computer name per line.
+
+.PARAMETER FromAD
+    Pulls all enabled computer objects from Active Directory.
+
+.PARAMETER ADFilter
+    Filter for AD computer names, e.g., SEC*. Only used with -FromAD.
+
+.PARAMETER Activate
+    After setting KMS host, also run slmgr.vbs /ato.
+
+.PARAMETER Report
+    Report the current KMS host configured on each computer.
+
+.PARAMETER DebugReport
+    Return the full raw KMS report (slmgr.vbs /dlv) for debugging and validation.
 #>
 
 param(
