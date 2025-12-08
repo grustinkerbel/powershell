@@ -1,7 +1,27 @@
 <#
 .SYNOPSIS
-    Sets the Windows KMS server, optionally activates Windows, reports the current KMS host,
-    or outputs the full KMS report for debugging.
+    Configure or activate Windows KMS licensing for remote computers.
+
+.PARAMETER ComputerName
+    One or more computer names.
+
+.PARAMETER ComputerList
+    Path to a text file containing computer names.
+
+.PARAMETER FromAD
+    Pull computer names from Active Directory.
+
+.PARAMETER ADFilter
+    A wildcard filter to apply to AD computer names.
+
+.PARAMETER Activate
+    Only activate Windows (no host change).
+
+.PARAMETER SetHost
+    Set the KMS host (and optional port).
+
+.EXAMPLE
+    .\kms_set.ps1 -Activate -FromAD -ADFilter "SEC*"
 #>
 
 param(
