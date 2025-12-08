@@ -1,24 +1,29 @@
 <#
+
 .SYNOPSIS
-    Configure or activate Windows KMS licensing for remote computers.
+    Sets the Windows KMS server, optionally activates Windows, reports the current KMS host,
+    or outputs the full KMS report for debugging.
 
 .PARAMETER ComputerName
-    One or more computer names.
+    Run the command on a single computer.
 
 .PARAMETER ComputerList
-    Path to a text file containing computer names.
+    Path to a text file containing one computer name per line.
 
 .PARAMETER FromAD
-    Pull computer names from Active Directory.
+    Pulls all enabled computer objects from Active Directory.
+
+.PARAMETER Activate
+    After setting KMS host, also run slmgr.vbs /ato.
+
+.PARAMETER Report
+    Report the current KMS host configured on each computer.
+
+.PARAMETER DebugReport
+    Return the full raw KMS report (slmgr.vbs /dlv) for debugging and validation.
 
 .PARAMETER ADFilter
     A wildcard filter to apply to AD computer names.
-
-.PARAMETER Activate
-    Only activate Windows (no host change).
-
-.PARAMETER SetHost
-    Set the KMS host (and optional port).
 
 .EXAMPLE
     .\kms_set.ps1 -Activate -FromAD -ADFilter "SEC*"
