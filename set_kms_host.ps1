@@ -4,6 +4,9 @@
     Sets the Windows KMS server, optionally activates Windows, reports the current KMS host,
     or outputs the full KMS report for debugging.
 
+.PARAMETER Activate
+    After setting KMS host, also run slmgr.vbs /ato.
+
 .PARAMETER ComputerName
     Run the command on a single computer.
 
@@ -13,8 +16,8 @@
 .PARAMETER FromAD
     Pulls all enabled computer objects from Active Directory.
 
-.PARAMETER Activate
-    After setting KMS host, also run slmgr.vbs /ato.
+.PARAMETER ADFilter
+    A wildcard filter to apply to AD computer names.
 
 .PARAMETER Report
     Report the current KMS host configured on each computer.
@@ -22,8 +25,7 @@
 .PARAMETER DebugReport
     Return the full raw KMS report (slmgr.vbs /dlv) for debugging and validation.
 
-.PARAMETER ADFilter
-    A wildcard filter to apply to AD computer names.
+
 
 .EXAMPLE
     .\kms_set.ps1 -Activate -FromAD -ADFilter "SEC*"
