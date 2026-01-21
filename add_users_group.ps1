@@ -1,3 +1,48 @@
+<#
+.SYNOPSIS
+Adds a list of users to an Active Directory group, supporting both plain text and CSV imports.
+
+.DESCRIPTION
+This script imports a list of users from either a plain text file or a CSV file and adds them to the specified Active Directory group. 
+It includes verbose logging, error handling, a dry-run mode, and generates a detailed report at the end. 
+The CSV option allows mapping a column as the AD username and includes first/last names in the report.
+
+.PARAMETER UserListPath
+Path to the input file containing users. Defaults to 'UserList.txt' in the current directory.
+
+.PARAMETER GroupName
+Name of the Active Directory group to which users will be added. Defaults to 'Gets_AdobeCC'.
+
+.PARAMETER CsvUsernameColumn
+The column in the CSV file that contains the AD username. Defaults to 'username'. Only used if -UseCsv is specified.
+
+.PARAMETER UseCsv
+Switch to indicate the input file is a CSV. If not specified, a plain text file is assumed.
+
+.PARAMETER ReportPath
+Path to export the CSV report. Defaults to 'AddUsersReport.csv' in the current directory.
+
+.PARAMETER DryRun
+Switch to perform a dry-run. No changes will be made to AD. The report and summary will still be generated.
+
+.EXAMPLE
+# Add users from a plain text file with verbose logging
+.\Add_AdobeUsers.ps1 -Verbose
+
+.EXAMPLE
+# Import users from a CSV in dry-run mode
+.\Add_AdobeUsers.ps1 -UserListPath ".\UserList.csv" -UseCsv -DryRun -Verbose
+
+.EXAMPLE
+# Actual run with CSV input and custom report location
+.\Add_AdobeUsers.ps1 -UseCsv -UserListPath ".\AdobeUsers.csv" -ReportPath ".\AdobeAddReport.csv" -Verbose
+
+.NOTES
+- Requires the ActiveDirectory PowerShell module.
+- Handles errors and skips users not found or already in the group.
+- Generates a report with status: Added, Skipped, Would Add (dry-run), or Failed.
+#>
+
 [CmdletBinding()]
 param (
     [string]$UserListPath,
