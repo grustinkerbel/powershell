@@ -3,17 +3,17 @@
 BitLocker Reporting and Status Module
 
 .DESCRIPTION
-Provides BitLocker status reporting for Active Directory computers or a specified computer list.
+Provides BitLocker status reporting for AD computers or a specified computer list.
 Supports:
 - Queue file processing (comments out completed computers)
 - AD filter mode
 - CSV output (Append or Overwrite)
 - Timestamps
-- Parallel scanning (PowerShell 7+)
-- Scheduler-friendly
+- Parallel scanning in PowerShell 7+
+- Scheduler-safe operation
 
 .AUTHOR
-Bill Galway (enhanced style)
+Bill Galway
 #>
 
 # ----------------------------
@@ -34,7 +34,6 @@ function Write-Log {
 # ----------------------------
 function Test-DeviceOnline {
     param([string]$ComputerName)
-
     Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue
 }
 
@@ -54,9 +53,7 @@ function Get-BitLockerStatusRemote {
             }
         } -ErrorAction Stop
     }
-    catch {
-        return $null
-    }
+    catch { return $null }
 }
 
 # ----------------------------
@@ -143,28 +140,22 @@ function Get-ADBitLockerReport {
 Retrieves BitLocker status for AD computers or a computer list.
 
 .DESCRIPTION
-Supports:
-- Queue file mode (comments out processed computers)
-- AD filter mode
-- Parallel scanning
-- CSV output with append or overwrite
-- Timestamped results
-- Scheduler-safe operation
+Supports queue files, AD filters, parallel scanning in PS7+, CSV output, timestamps, and scheduler-friendly operation.
 
 .PARAMETER Filter
-Active Directory filter string to select computers (e.g., "Name -like 'LAB-*'").
+Active Directory filter string (e.g., "Name -like 'LAB-*'").
 
 .PARAMETER ComputerList
 Path to a text file with computer names (one per line). Processed computers are commented out.
 
 .PARAMETER OutputPath
-Path to the CSV file for output. Default: .\BitLocker_Report.csv
+Path to CSV file. Default: .\BitLocker_Report.csv
 
 .PARAMETER Mode
 "Append" to add to existing CSV, or "Overwrite" for fresh output. Default: Append
 
 .PARAMETER ThrottleLimit
-Number of computers to process in parallel. Default: 20
+Number of computers to process in parallel (PS7+). Default: 20
 
 .EXAMPLE
 # Interactive AD filter
@@ -179,7 +170,7 @@ Get-ADBitLockerReport -Filter "Name -like 'LIB-*'" -OutputPath "C:\Reports\BitLo
 Get-ADBitLockerReport -ComputerList "C:\Scripts\computers.txt" -OutputPath "C:\Reports\BitLocker_Report.csv"
 
 .EXAMPLE
-# Parallel scanning with 30 threads
+# Parallel scanning with 30 threads (PS7+)
 Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" -ThrottleLimit 30
 #>
 
@@ -194,6 +185,18 @@ Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" -ThrottleLimit 30
     )
 
     $Results = @()
+
+    # -----------------------------
+    # Determine PS version for parallel
+    # -----------------------------
+    $UseParallel = $false
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        $UseParallel = $true
+        Write-Log "PowerShell 7+ detected, parallel scanning enabled."
+    }
+    else {
+        Write-Log "PowerShell <7 detected, sequential scanning will be used."
+    }
 
     # -----------------------------
     # QUEUE FILE MODE
@@ -214,29 +217,37 @@ Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" -ThrottleLimit 30
             return
         }
 
-        # Parallel processing
-        $Results = $ComputersToProcess | ForEach-Object -Parallel {
-            param($ComputerName)
-            function Test-DeviceOnline { param($ComputerName); Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue }
-            function Get-BitLockerStatusRemote { param($ComputerName); try { Invoke-Command -ComputerName $ComputerName -ScriptBlock { $b = Get-BitLockerVolume -MountPoint "C:"; [PSCustomObject]@{VolumeStatus=$b.VolumeStatus; ProtectionStatus=$b.ProtectionStatus; EncryptionPercent=$b.EncryptionPercentage} } -ErrorAction Stop } catch { $null } }
+        if ($UseParallel) {
+            # PS7+ parallel
+            $Results = $ComputersToProcess | ForEach-Object -Parallel {
+                param($ComputerName)
+                function Test-DeviceOnline { param($ComputerName); Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue }
+                function Get-BitLockerStatusRemote { param($ComputerName); try { Invoke-Command -ComputerName $ComputerName -ScriptBlock { $b = Get-BitLockerVolume -MountPoint "C:"; [PSCustomObject]@{VolumeStatus=$b.VolumeStatus; ProtectionStatus=$b.ProtectionStatus; EncryptionPercent=$b.EncryptionPercentage} } -ErrorAction Stop } catch { $null } }
 
-            $timestamp = Get-Date
-            $online = Test-DeviceOnline $ComputerName
+                $timestamp = Get-Date
+                $online = Test-DeviceOnline $ComputerName
 
-            if (-not $online) {
-                [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$false;Reported=$false;Volume="";Protected="";Percent=""}
-            }
-            else {
-                $status = Get-BitLockerStatusRemote $ComputerName
-                if ($status) {
-                    [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$true;Reported=$true;Volume=$status.VolumeStatus;Protected=$status.ProtectionStatus;Percent=$status.EncryptionPercent}
+                if (-not $online) {
+                    [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$false;Reported=$false;Volume="";Protected="";Percent=""}
                 }
                 else {
-                    [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$true;Reported=$false;Volume="Error";Protected="";Percent=""}
+                    $status = Get-BitLockerStatusRemote $ComputerName
+                    if ($status) {
+                        [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$true;Reported=$true;Volume=$status.VolumeStatus;Protected=$status.ProtectionStatus;Percent=$status.EncryptionPercent}
+                    }
+                    else {
+                        [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$true;Reported=$false;Volume="Error";Protected="";Percent=""}
+                    }
                 }
-            }
 
-        } -ThrottleLimit $ThrottleLimit
+            } -ThrottleLimit $ThrottleLimit
+        }
+        else {
+            # Sequential fallback
+            foreach ($c in $ComputersToProcess) {
+                $Results += Process-Computer -ComputerName $c
+            }
+        }
 
         # Comment out processed computers
         foreach ($c in $ComputersToProcess) {
@@ -264,29 +275,35 @@ Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" -ThrottleLimit 30
             return
         }
 
-        # Parallel processing
-        $Results = $Computers | ForEach-Object -Parallel {
-            param($ComputerName)
-            function Test-DeviceOnline { param($ComputerName); Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue }
-            function Get-BitLockerStatusRemote { param($ComputerName); try { Invoke-Command -ComputerName $ComputerName -ScriptBlock { $b = Get-BitLockerVolume -MountPoint "C:"; [PSCustomObject]@{VolumeStatus=$b.VolumeStatus; ProtectionStatus=$b.ProtectionStatus; EncryptionPercent=$b.EncryptionPercentage} } -ErrorAction Stop } catch { $null } }
+        if ($UseParallel) {
+            $Results = $Computers | ForEach-Object -Parallel {
+                param($ComputerName)
+                function Test-DeviceOnline { param($ComputerName); Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue }
+                function Get-BitLockerStatusRemote { param($ComputerName); try { Invoke-Command -ComputerName $ComputerName -ScriptBlock { $b = Get-BitLockerVolume -MountPoint "C:"; [PSCustomObject]@{VolumeStatus=$b.VolumeStatus; ProtectionStatus=$b.ProtectionStatus; EncryptionPercent=$b.EncryptionPercentage} } -ErrorAction Stop } catch { $null } }
 
-            $timestamp = Get-Date
-            $online = Test-DeviceOnline $ComputerName
+                $timestamp = Get-Date
+                $online = Test-DeviceOnline $ComputerName
 
-            if (-not $online) {
-                [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$false;Reported=$false;Volume="";Protected="";Percent=""}
-            }
-            else {
-                $status = Get-BitLockerStatusRemote $ComputerName
-                if ($status) {
-                    [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$true;Reported=$true;Volume=$status.VolumeStatus;Protected=$status.ProtectionStatus;Percent=$status.EncryptionPercent}
+                if (-not $online) {
+                    [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$false;Reported=$false;Volume="";Protected="";Percent=""}
                 }
                 else {
-                    [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$true;Reported=$false;Volume="Error";Protected="";Percent=""}
+                    $status = Get-BitLockerStatusRemote $ComputerName
+                    if ($status) {
+                        [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$true;Reported=$true;Volume=$status.VolumeStatus;Protected=$status.ProtectionStatus;Percent=$status.EncryptionPercent}
+                    }
+                    else {
+                        [PSCustomObject]@{Timestamp=$timestamp;Computer=$ComputerName;Online=$true;Reported=$false;Volume="Error";Protected="";Percent=""}
+                    }
                 }
-            }
 
-        } -ThrottleLimit $ThrottleLimit
+            } -ThrottleLimit $ThrottleLimit
+        }
+        else {
+            foreach ($c in $Computers) {
+                $Results += Process-Computer -ComputerName $c
+            }
+        }
     }
 
     # Export results
