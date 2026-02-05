@@ -90,6 +90,7 @@ function Process-Computer {
         $status = Get-BitLockerStatusRemote $ComputerName
     }
     else {
+        # ADOnly mode: no online checks
         $status = [PSCustomObject]@{
             VolumeStatus      = ""
             ProtectionStatus  = ""
@@ -97,9 +98,9 @@ function Process-Computer {
         }
     }
 
-    $key = if ($IncludeRecoveryKey) { Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName | Select-Object -First 1 } else { $null }
+    $key = if ($IncludeRecoveryKey -or $ADOnly) { Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName | Select-Object -First 1 } else { $null }
 
-    # Backup missing AD key if requested
+    # Backup missing AD key if requested and not ADOnly
     if (-not $ADOnly -and -not $key -and $BackupMissingADKey) {
         Write-Log "Recovery key missing in AD for $ComputerName. Attempting backup..."
         try {
@@ -132,11 +133,10 @@ function Process-Computer {
         Volume           = $status.VolumeStatus
         Protected        = $status.ProtectionStatus
         Percent          = $status.EncryptionPercent
-        RecoveryKeyID    = if($IncludeRecoveryKey){$key.RecoveryKeyID}else{""}
-        RecoveryPassword = if($IncludeRecoveryKey){$key.RecoveryPassword}else{""}
+        RecoveryKeyID    = if($IncludeRecoveryKey){$key.RecoveryKeyID} elseif ($ADOnly){ if($key){$true}else{$false} } else { "" }
+        RecoveryPassword = if($IncludeRecoveryKey){$key.RecoveryPassword} elseif ($ADOnly){ if($key){$true}else{$false} } else { "" }
     }
 }
-
 # ----------------------------
 # CSV export helper
 # ----------------------------
