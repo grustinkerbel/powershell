@@ -5,7 +5,7 @@ BitLocker Reporting and Status Module
 .DESCRIPTION
 Provides BitLocker status reporting for AD computers or a specified computer list.
 Supports:
-- Queue file processing (comments out completed computers)
+- Queue file processing (comments out only online computers)
 - AD filter mode
 - CSV output (Append or Overwrite)
 - Timestamps
@@ -146,7 +146,7 @@ Supports queue files, AD filters, parallel scanning in PS7+, CSV output, timesta
 Active Directory filter string (e.g., "Name -like 'LAB-*'").
 
 .PARAMETER ComputerList
-Path to a text file with computer names (one per line). Processed computers are commented out.
+Path to a text file with computer names (one per line). Only online computers are commented out.
 
 .PARAMETER OutputPath
 Path to CSV file. Default: .\BitLocker_Report.csv
@@ -217,6 +217,9 @@ Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" -ThrottleLimit 30
             return
         }
 
+        # -------------------------
+        # PROCESS COMPUTERS
+        # -------------------------
         if ($UseParallel) {
             # PS7+ parallel
             $Results = $ComputersToProcess | ForEach-Object -Parallel {
@@ -249,12 +252,22 @@ Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" -ThrottleLimit 30
             }
         }
 
-        # Comment out processed computers
-        foreach ($c in $ComputersToProcess) {
-            (Get-Content $ComputerList) | ForEach-Object {
-                if ($_ -eq $c) { "#$_" } else { $_ }
-            } | Set-Content $ComputerList
+        # -------------------------
+        # COMMENT OUT ONLY ONLINE COMPUTERS
+        # -------------------------
+        $OnlineComputers = $Results | Where-Object { $_.Online -eq $true } | Select-Object -ExpandProperty Computer
+
+        $QueueContent = Get-Content $ComputerList
+        $NewQueue = $QueueContent | ForEach-Object {
+            $line = $_.Trim()
+            if ($line -and -not $line.StartsWith("#") -and $OnlineComputers -contains $line) {
+                "#$line"   # comment out only online computers
+            }
+            else {
+                $_
+            }
         }
+        $NewQueue | Set-Content $ComputerList
     }
 
     # -----------------------------
