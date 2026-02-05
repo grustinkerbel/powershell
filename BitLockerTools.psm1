@@ -39,7 +39,6 @@ function Get-BitLockerStatusRemote {
 # ----------------------------
 # AD Recovery Key query
 # ----------------------------
-
 function Get-ADBitLockerRecoveryKeys {
     param([string]$ComputerName)
     try {
@@ -66,31 +65,42 @@ function Process-Computer {
     param(
         [string]$ComputerName,
         [switch]$IncludeRecoveryKey,
-        [switch]$BackupMissingADKey
+        [switch]$BackupMissingADKey,
+        [switch]$ADOnly
     )
 
     $timestamp = Get-Date
-    $online = Test-DeviceOnline $ComputerName
 
-    if (-not $online) {
-        return [PSCustomObject]@{
-            Timestamp        = $timestamp
-            Computer         = $ComputerName
-            Online           = $false
-            Reported         = $false
-            Volume           = ""
-            Protected        = ""
-            Percent          = ""
-            RecoveryKeyID    = ""
-            RecoveryPassword = ""
+    if (-not $ADOnly) {
+        $online = Test-DeviceOnline $ComputerName
+        if (-not $online) {
+            return [PSCustomObject]@{
+                Timestamp        = $timestamp
+                Computer         = $ComputerName
+                Online           = $false
+                Reported         = $false
+                Volume           = ""
+                Protected        = ""
+                Percent          = ""
+                RecoveryKeyID    = ""
+                RecoveryPassword = ""
+            }
+        }
+
+        $status = Get-BitLockerStatusRemote $ComputerName
+    }
+    else {
+        $status = [PSCustomObject]@{
+            VolumeStatus      = ""
+            ProtectionStatus  = ""
+            EncryptionPercent = ""
         }
     }
 
-    $status = Get-BitLockerStatusRemote $ComputerName
     $key = if ($IncludeRecoveryKey) { Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName | Select-Object -First 1 } else { $null }
 
     # Backup missing AD key if requested
-    if (-not $key -and $BackupMissingADKey) {
+    if (-not $ADOnly -and -not $key -and $BackupMissingADKey) {
         Write-Log "Recovery key missing in AD for $ComputerName. Attempting backup..."
         try {
             $Protector = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
@@ -114,31 +124,16 @@ function Process-Computer {
     }
 
     # Build object
-    if ($status) {
-        return [PSCustomObject]@{
-            Timestamp        = $timestamp
-            Computer         = $ComputerName
-            Online           = $true
-            Reported         = $true
-            Volume           = $status.VolumeStatus
-            Protected        = $status.ProtectionStatus
-            Percent          = $status.EncryptionPercent
-            RecoveryKeyID    = if($IncludeRecoveryKey){$key.RecoveryKeyID}else{""}
-            RecoveryPassword = if($IncludeRecoveryKey){$key.RecoveryPassword}else{""}
-        }
-    }
-    else {
-        return [PSCustomObject]@{
-            Timestamp        = $timestamp
-            Computer         = $ComputerName
-            Online           = $true
-            Reported         = $false
-            Volume           = "Error"
-            Protected        = ""
-            Percent          = ""
-            RecoveryKeyID    = if($IncludeRecoveryKey){$key.RecoveryKeyID}else{""}
-            RecoveryPassword = if($IncludeRecoveryKey){$key.RecoveryPassword}else{""}
-        }
+    return [PSCustomObject]@{
+        Timestamp        = $timestamp
+        Computer         = $ComputerName
+        Online           = if($ADOnly){$null}else{$true}
+        Reported         = if($ADOnly){$true}else{$status -ne $null}
+        Volume           = $status.VolumeStatus
+        Protected        = $status.ProtectionStatus
+        Percent          = $status.EncryptionPercent
+        RecoveryKeyID    = if($IncludeRecoveryKey){$key.RecoveryKeyID}else{""}
+        RecoveryPassword = if($IncludeRecoveryKey){$key.RecoveryPassword}else{""}
     }
 }
 
@@ -171,7 +166,7 @@ function Export-ResultsSafe {
 
 <#
 .SYNOPSIS
-BitLocker Reporting, Recovery Key Query, and Backup Module
+BitLocker Reporting, Recovery Key Query, Backup, and ADOnly Mode
 
 .DESCRIPTION
 Retrieves BitLocker status for AD computers or a computer list.
@@ -182,14 +177,15 @@ backup the local BitLocker recovery key to AD.
 Supports:
 - Queue file processing (comments out only online computers)
 - AD filter mode
+- ADOnly mode (query AD only, no online checks / no remoting)
 - CSV output (Append or Overwrite)
 - Timestamps
 - Parallel scanning in PowerShell 7+
 - Scheduler-safe operation
 
 .PARAMETER Filter
-Active Directory filter string (e.g., "Name -like 'LAB-*'").
-Used to select computers directly from AD.
+Active Directory prefix string (e.g., "LAB-*").
+Automatically prepends "Name -like" for AD queries.
 
 .PARAMETER ComputerList
 Path to a text file containing computer names (one per line).
@@ -214,20 +210,23 @@ If a recovery key does not exist in AD, attempt to backup the local
 BitLocker recovery password protector to Active Directory automatically
 using Backup-BitLockerKeyProtector.
 
+.PARAMETER ADOnly
+Switch. Query AD only. Skips online checks and BitLocker remoting.
+
 .EXAMPLE
 Basic BitLocker status only (no recovery keys).
 
-Get-ADBitLockerReport -Filter "Name -like 'LAB-*'"
+Get-ADBitLockerReport -Filter "LAB-*"
 
 .EXAMPLE
 Include recovery keys stored in Active Directory.
 
-Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" -IncludeRecoveryKey
+Get-ADBitLockerReport -Filter "LAB-*" -IncludeRecoveryKey
 
 .EXAMPLE
 Include keys and automatically back up any missing recovery keys to AD.
 
-Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" -IncludeRecoveryKey -BackupMissingADKey
+Get-ADBitLockerReport -Filter "LAB-*" -IncludeRecoveryKey -BackupMissingADKey
 
 .EXAMPLE
 Process computers from a queue file for scheduled task usage.
@@ -242,7 +241,12 @@ Get-ADBitLockerReport -ComputerList "C:\Scripts\ComputerQueue.txt" -IncludeRecov
 .EXAMPLE
 Run a full audit and overwrite the previous report.
 
-Get-ADBitLockerReport -Filter "Name -like '*'" -IncludeRecoveryKey -Mode Overwrite -OutputPath "C:\Reports\FullAudit.csv"
+Get-ADBitLockerReport -Filter "*" -IncludeRecoveryKey -Mode Overwrite -OutputPath "C:\Reports\FullAudit.csv"
+
+.EXAMPLE
+Query only AD for computers (no online checks).
+
+Get-ADBitLockerReport -Filter "LAB-*" -ADOnly -IncludeRecoveryKey
 #>
 function Get-ADBitLockerReport {
     [CmdletBinding()]
@@ -254,18 +258,25 @@ function Get-ADBitLockerReport {
         [string]$Mode = "Append",
         [int]$ThrottleLimit = 20,
         [switch]$IncludeRecoveryKey,
-        [switch]$BackupMissingADKey
+        [switch]$BackupMissingADKey,
+        [switch]$ADOnly
     )
 
     $Results = @()
     $UseParallel = $PSVersionTable.PSVersion.Major -ge 7
 
-    if ($UseParallel) { Write-Log "PowerShell 7+ detected, parallel scanning enabled." } 
-    else { Write-Log "PowerShell <7 detected, sequential scanning will be used." }
+    # -----------------------------
+    # Prep Filter
+    # -----------------------------
+    if ($Filter) {
+        if (-not $Filter.Trim().StartsWith("Name -like")) {
+            $Filter = "Name -like '$Filter'"
+        }
+    }
+    else {
+        $Filter = "*"
+    }
 
-    # -----------------------------
-    # Queue file mode
-    # -----------------------------
     if ($ComputerList) {
         if (-not (Test-Path $ComputerList)) { Write-Log "Computer list file not found: $ComputerList" "ERROR"; exit 1 }
 
@@ -275,44 +286,39 @@ function Get-ADBitLockerReport {
 
         if ($UseParallel) {
             $Results = $ComputersToProcess | ForEach-Object -Parallel {
-                param($ComputerName,$IncludeRecoveryKey,$BackupMissingADKey)
-                function Test-DeviceOnline { param($ComputerName); Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue }
-                function Get-BitLockerStatusRemote { param($ComputerName); try { Invoke-Command -ComputerName $ComputerName -ScriptBlock { $b = Get-BitLockerVolume -MountPoint "C:"; [PSCustomObject]@{VolumeStatus=$b.VolumeStatus; ProtectionStatus=$b.ProtectionStatus; EncryptionPercent=$b.EncryptionPercentage} } -ErrorAction Stop } catch { $null } }
-                function Get-ADBitLockerRecoveryKeys { param($ComputerName); try { $Comp = Get-ADComputer -Identity $ComputerName; $RecoveryObjects = Get-ADObject -Filter "objectClass -eq 'msFVE-RecoveryInformation'" -SearchBase $Comp.DistinguishedName -Properties 'msFVE-RecoveryPassword'; $RecoveryObjects | ForEach-Object { [PSCustomObject]@{Computer=$ComputerName;RecoveryKeyID=$_.ObjectGUID;RecoveryPassword=$_.'msFVE-RecoveryPassword'} } } catch { @() } }
-                & { Process-Computer -ComputerName $ComputerName -IncludeRecoveryKey:$IncludeRecoveryKey -BackupMissingADKey:$BackupMissingADKey }
-            } -ThrottleLimit $ThrottleLimit -ArgumentList $IncludeRecoveryKey,$BackupMissingADKey
+                param($ComputerName,$IncludeRecoveryKey,$BackupMissingADKey,$ADOnly)
+                function Process-Computer { param($ComputerName,$IncludeRecoveryKey,$BackupMissingADKey,$ADOnly); & $using:Process-Computer -ComputerName $ComputerName -IncludeRecoveryKey:$IncludeRecoveryKey -BackupMissingADKey:$BackupMissingADKey -ADOnly:$ADOnly }
+                & { Process-Computer -ComputerName $ComputerName -IncludeRecoveryKey:$IncludeRecoveryKey -BackupMissingADKey:$BackupMissingADKey -ADOnly:$ADOnly }
+            } -ThrottleLimit $ThrottleLimit -ArgumentList $IncludeRecoveryKey,$BackupMissingADKey,$ADOnly
         }
         else {
-            foreach ($c in $ComputersToProcess) { $Results += Process-Computer -ComputerName $c -IncludeRecoveryKey:$IncludeRecoveryKey -BackupMissingADKey:$BackupMissingADKey }
+            foreach ($c in $ComputersToProcess) { $Results += Process-Computer -ComputerName $c -IncludeRecoveryKey:$IncludeRecoveryKey -BackupMissingADKey:$BackupMissingADKey -ADOnly:$ADOnly }
         }
 
-        # Comment out online computers
-        $OnlineComputers = $Results | Where-Object { $_.Online -eq $true } | Select-Object -ExpandProperty Computer
-        $QueueContent = Get-Content $ComputerList
-        $NewQueue = $QueueContent | ForEach-Object { $line = $_.Trim(); if ($line -and -not $line.StartsWith("#") -and $OnlineComputers -contains $line) { "#$line" } else { $_ } }
-        $NewQueue | Set-Content $ComputerList
+        # Comment out online computers if not ADOnly
+        if (-not $ADOnly) {
+            $OnlineComputers = $Results | Where-Object { $_.Online -eq $true } | Select-Object -ExpandProperty Computer
+            $QueueContent = Get-Content $ComputerList
+            $NewQueue = $QueueContent | ForEach-Object { $line = $_.Trim(); if ($line -and -not $_.StartsWith("#") -and $OnlineComputers -contains $line) { "#$line" } else { $_ } }
+            $NewQueue | Set-Content $ComputerList
+        }
     }
-
-    # -----------------------------
-    # AD filter mode
-    # -----------------------------
     else {
-        if (-not $Filter) { $Filter = Read-Host "Enter AD filter (example: Name -like 'LAB-*')" }
+        # -----------------------------
+        # AD filter mode
+        # -----------------------------
         Write-Log "Querying AD with filter: $Filter"
         $Computers = Get-ADComputer -Filter $Filter | Select-Object -ExpandProperty Name
         if (-not $Computers) { Write-Log "No computers found for filter."; return }
 
         if ($UseParallel) {
             $Results = $Computers | ForEach-Object -Parallel {
-                param($ComputerName,$IncludeRecoveryKey,$BackupMissingADKey)
-                function Test-DeviceOnline { param($ComputerName); Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue }
-                function Get-BitLockerStatusRemote { param($ComputerName); try { Invoke-Command -ComputerName $ComputerName -ScriptBlock { $b = Get-BitLockerVolume -MountPoint "C:"; [PSCustomObject]@{VolumeStatus=$b.VolumeStatus; ProtectionStatus=$b.ProtectionStatus; EncryptionPercent=$b.EncryptionPercentage} } -ErrorAction Stop } catch { $null } }
-                function Get-ADBitLockerRecoveryKeys { param($ComputerName); try { $Comp = Get-ADComputer -Identity $ComputerName; $RecoveryObjects = Get-ADObject -Filter "objectClass -eq 'msFVE-RecoveryInformation'" -SearchBase $Comp.DistinguishedName -Properties 'msFVE-RecoveryPassword'; $RecoveryObjects | ForEach-Object { [PSCustomObject]@{Computer=$ComputerName;RecoveryKeyID=$_.ObjectGUID;RecoveryPassword=$_.'msFVE-RecoveryPassword'} } } catch { @() } }
-                & { Process-Computer -ComputerName $ComputerName -IncludeRecoveryKey:$IncludeRecoveryKey -BackupMissingADKey:$BackupMissingADKey }
-            } -ThrottleLimit $ThrottleLimit -ArgumentList $IncludeRecoveryKey,$BackupMissingADKey
+                param($ComputerName,$IncludeRecoveryKey,$BackupMissingADKey,$ADOnly)
+                & $using:Process-Computer -ComputerName $ComputerName -IncludeRecoveryKey:$IncludeRecoveryKey -BackupMissingADKey:$BackupMissingADKey -ADOnly:$ADOnly
+            } -ThrottleLimit $ThrottleLimit -ArgumentList $IncludeRecoveryKey,$BackupMissingADKey,$ADOnly
         }
         else {
-            foreach ($c in $Computers) { $Results += Process-Computer -ComputerName $c -IncludeRecoveryKey:$IncludeRecoveryKey -BackupMissingADKey:$BackupMissingADKey }
+            foreach ($c in $Computers) { $Results += Process-Computer -ComputerName $c -IncludeRecoveryKey:$IncludeRecoveryKey -BackupMissingADKey:$BackupMissingADKey -ADOnly:$ADOnly }
         }
     }
 
