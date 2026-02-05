@@ -3,35 +3,18 @@
 BitLocker Reporting and Status Module
 
 .DESCRIPTION
-This module provides reporting of BitLocker status for Active Directory computers or a provided computer list.
+Provides BitLocker status reporting for Active Directory computers or a specified computer list.
 Supports:
-- Queue file processing (comments out completed devices)
+- Queue file processing (comments out completed computers)
 - AD filter mode
-- CSV output (append or overwrite)
-- Timestamped results
-- Parallel scanning for speed (PowerShell 7+)
-- Scheduler-friendly operation
+- CSV output (Append or Overwrite)
+- Timestamps
+- Parallel scanning (PowerShell 7+)
+- Scheduler-friendly
 
 .AUTHOR
-Bill Galway (style + enhanced)
-
-.EXAMPLE
-# Interactive AD filter
-Import-Module .\BitLockerTools.psm1
-Get-ADBitLockerReport
-
-.EXAMPLE
-# AD filter with overwrite CSV
-Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" -OutputPath C:\Reports\BitLocker_Report.csv -Mode Overwrite
-
-.EXAMPLE
-# Scheduled task queue file
-Get-ADBitLockerReport -ComputerList C:\Scripts\computers.txt -OutputPath C:\Reports\BitLocker_Report.csv
-
-# ThrottleLimit default = 20 for parallel processing
-# Make sure you are running PowerShell 7+ for parallel execution
+Bill Galway (enhanced style)
 #>
-# ============================================
 
 # ----------------------------
 # Logging helper
@@ -46,7 +29,6 @@ function Write-Log {
     Write-Host "[$time][$Level] $Message"
 }
 
-
 # ----------------------------
 # Online test
 # ----------------------------
@@ -55,7 +37,6 @@ function Test-DeviceOnline {
 
     Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue
 }
-
 
 # ----------------------------
 # Remote BitLocker query
@@ -78,14 +59,11 @@ function Get-BitLockerStatusRemote {
     }
 }
 
-
 # ----------------------------
 # Core worker (single computer)
 # ----------------------------
 function Process-Computer {
-    param(
-        [string]$ComputerName
-    )
+    param([string]$ComputerName)
 
     $timestamp = Get-Date
     $online = Test-DeviceOnline $ComputerName
@@ -128,7 +106,6 @@ function Process-Computer {
     }
 }
 
-
 # ----------------------------
 # CSV export helper
 # ----------------------------
@@ -156,11 +133,55 @@ function Export-ResultsSafe {
     }
 }
 
-
 # =================================================
 # MAIN FUNCTION
 # =================================================
 function Get-ADBitLockerReport {
+
+<#
+.SYNOPSIS
+Retrieves BitLocker status for AD computers or a computer list.
+
+.DESCRIPTION
+Supports:
+- Queue file mode (comments out processed computers)
+- AD filter mode
+- Parallel scanning
+- CSV output with append or overwrite
+- Timestamped results
+- Scheduler-safe operation
+
+.PARAMETER Filter
+Active Directory filter string to select computers (e.g., "Name -like 'LAB-*'").
+
+.PARAMETER ComputerList
+Path to a text file with computer names (one per line). Processed computers are commented out.
+
+.PARAMETER OutputPath
+Path to the CSV file for output. Default: .\BitLocker_Report.csv
+
+.PARAMETER Mode
+"Append" to add to existing CSV, or "Overwrite" for fresh output. Default: Append
+
+.PARAMETER ThrottleLimit
+Number of computers to process in parallel. Default: 20
+
+.EXAMPLE
+# Interactive AD filter
+Get-ADBitLockerReport
+
+.EXAMPLE
+# AD filter with overwrite
+Get-ADBitLockerReport -Filter "Name -like 'LIB-*'" -OutputPath "C:\Reports\BitLocker_Report.csv" -Mode Overwrite
+
+.EXAMPLE
+# Queue file mode for scheduled tasks
+Get-ADBitLockerReport -ComputerList "C:\Scripts\computers.txt" -OutputPath "C:\Reports\BitLocker_Report.csv"
+
+.EXAMPLE
+# Parallel scanning with 30 threads
+Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" -ThrottleLimit 30
+#>
 
     [CmdletBinding()]
     param(
@@ -172,7 +193,6 @@ function Get-ADBitLockerReport {
         [int]$ThrottleLimit = 20
     )
 
-    # Array to hold results
     $Results = @()
 
     # -----------------------------
@@ -187,7 +207,6 @@ function Get-ADBitLockerReport {
 
         Write-Log "Using queue file: $ComputerList"
 
-        # Read queue and remove comments/blanks
         $ComputersToProcess = Get-Content $ComputerList | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith("#") }
 
         if (-not $ComputersToProcess) {
@@ -198,8 +217,6 @@ function Get-ADBitLockerReport {
         # Parallel processing
         $Results = $ComputersToProcess | ForEach-Object -Parallel {
             param($ComputerName)
-
-            # Import functions into parallel runspace
             function Test-DeviceOnline { param($ComputerName); Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue }
             function Get-BitLockerStatusRemote { param($ComputerName); try { Invoke-Command -ComputerName $ComputerName -ScriptBlock { $b = Get-BitLockerVolume -MountPoint "C:"; [PSCustomObject]@{VolumeStatus=$b.VolumeStatus; ProtectionStatus=$b.ProtectionStatus; EncryptionPercent=$b.EncryptionPercentage} } -ErrorAction Stop } catch { $null } }
 
@@ -250,7 +267,6 @@ function Get-ADBitLockerReport {
         # Parallel processing
         $Results = $Computers | ForEach-Object -Parallel {
             param($ComputerName)
-
             function Test-DeviceOnline { param($ComputerName); Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue }
             function Get-BitLockerStatusRemote { param($ComputerName); try { Invoke-Command -ComputerName $ComputerName -ScriptBlock { $b = Get-BitLockerVolume -MountPoint "C:"; [PSCustomObject]@{VolumeStatus=$b.VolumeStatus; ProtectionStatus=$b.ProtectionStatus; EncryptionPercent=$b.EncryptionPercentage} } -ErrorAction Stop } catch { $null } }
 
@@ -278,6 +294,5 @@ function Get-ADBitLockerReport {
 
     return $Results
 }
-
 
 Export-ModuleMember -Function Get-ADBitLockerReport
