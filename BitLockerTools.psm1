@@ -1,9 +1,226 @@
-# ----------------------------
-# BitLockerTools.psm1
-# ----------------------------
-# Module: BitLocker Reporting, Recovery Key Query, Backup, ADOnly Mode, Duplicate Protector Cleanup
-# Supports: TPM detection, auto-enable BitLocker, AD recovery key backup, CSV reporting
-# ----------------------------
+<#
+.SYNOPSIS
+Generates a BitLocker status and recovery key report for Active Directory computers.
+
+.DESCRIPTION
+Get-ADBitLockerReport queries one or more domain-joined computers and collects:
+
+• Online/WinRM availability
+• BitLocker protection status
+• Encryption percentage
+• TPM presence and readiness
+• Active Directory recovery key information
+
+Optional capabilities include:
+• Automatically enabling BitLocker on eligible devices
+• Backing up missing recovery keys to AD
+• Removing duplicate recovery password protectors
+• Running in AD-only mode (no remote connectivity required)
+• Parallel processing for faster execution
+• Safe CSV export with append or overwrite modes
+
+This cmdlet can operate either:
+• Against all computers matching an AD filter, OR
+• From a supplied text file queue of computer names
+
+Results are exported to CSV and also returned to the pipeline.
+
+.PARAMETER Filter
+Active Directory computer filter.
+Defaults to "*" (all computers).
+
+Examples:
+    -Filter "Name -like 'LAB-*'"
+    -Filter "Name -like 'LT-*'"
+
+.PARAMETER ComputerList
+Path to a text file containing one computer name per line.
+Lines starting with # are ignored.
+Useful for queue-based or retry processing.
+
+.PARAMETER OutputPath
+Path to the CSV report file.
+Default: .\BitLocker_Report.csv
+
+.PARAMETER Mode
+Controls CSV behavior:
+Append     – adds to existing file
+Overwrite  – replaces file
+
+Default: Append
+
+.PARAMETER ThrottleLimit
+Maximum number of parallel threads when running in PowerShell 7+.
+Default: 20
+
+.PARAMETER IncludeRecoveryKey
+Includes the BitLocker recovery password and key ID from AD in the report.
+
+WARNING: Recovery passwords are sensitive information.
+
+.PARAMETER BackupMissingADKey
+If a recovery key exists locally but not in AD, attempts to back it up automatically.
+
+.PARAMETER ADOnly
+Skips all remote connectivity and only checks Active Directory for recovery keys.
+Useful for offline or unreachable machines.
+
+.PARAMETER AutoEnableBitLocker
+Automatically enables BitLocker on eligible machines where:
+• TPM is present
+• TPM is ready
+• BitLocker is not already enabled
+
+.PARAMETER CleanupDuplicateProtectors
+Removes extra recovery password protectors after enabling BitLocker,
+keeping only the newest protector to prevent duplicates.
+
+.EXAMPLE
+Get-ADBitLockerReport
+
+Runs against all domain computers and exports a basic BitLocker status report.
+
+.EXAMPLE
+Get-ADBitLockerReport -Filter "Name -like 'LT-*'" -IncludeRecoveryKey
+
+Reports on all laptops and includes AD recovery passwords.
+
+.EXAMPLE
+Get-ADBitLockerReport -ComputerList .\queue.txt -BackupMissingADKey
+
+Processes only machines in queue.txt and backs up missing recovery keys.
+
+.EXAMPLE
+Get-ADBitLockerReport -Filter "*" -AutoEnableBitLocker
+
+Automatically enables BitLocker on all eligible devices and reports results.
+
+.EXAMPLE
+Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" `
+    -AutoEnableBitLocker `
+    -CleanupDuplicateProtectors `
+    -IncludeRecoveryKey `
+    -Mode Overwrite
+
+Full remediation mode:
+* enables BitLocker
+* removes duplicate protectors
+* includes recovery keys
+* overwrites report
+
+.EXAMPLE
+Get-ADBitLockerReport -ADOnly -IncludeRecoveryKey
+
+Performs an AD-only audit of recovery key presence without contacting endpoints.
+
+.OUTPUTS
+PSCustomObject with:
+Timestamp, Computer, Online, Reported, Volume, Protected, Percent,
+RecoveryKeyID, RecoveryPassword, TPMPresent, TPMReady, CanEnableBitLocker
+
+.NOTES
+Author: Bill Galway
+Module: BitLockerTools
+Requires:
+• ActiveDirectory module
+• BitLocker cmdlets
+• WinRM enabled on targets
+• PowerShell 7+ recommended for parallel processing
+#>
+function Get-ADBitLockerReport {
+    [CmdletBinding()]
+    param(
+        [string]$Filter,
+        [string]$ComputerList,
+        [string]$OutputPath = ".\BitLocker_Report.csv",
+        [ValidateSet("Append","Overwrite")]
+        [string]$Mode = "Append",
+        [int]$ThrottleLimit = 20,
+        [switch]$IncludeRecoveryKey,
+        [switch]$BackupMissingADKey,
+        [switch]$ADOnly,
+        [switch]$AutoEnableBitLocker,
+        [switch]$CleanupDuplicateProtectors
+    )
+
+    $Results = @()
+    $UseParallel = $PSVersionTable.PSVersion.Major -ge 7
+
+    # Prep Filter
+    if ($Filter) { if (-not $Filter.Trim().StartsWith("Name -like")) { $Filter = "Name -like '$Filter'" } } else { $Filter = "*" }
+
+    # Determine computers to process
+    if ($ComputerList) {
+        if (-not (Test-Path $ComputerList)) { Write-Log "Computer list file not found: $ComputerList" "ERROR"; exit 1 }
+        Write-Log "Using queue file: $ComputerList"
+
+        $ComputersToProcess = Get-Content $ComputerList | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith("#") }
+        if (-not $ComputersToProcess) { Write-Log "No computers to process in queue."; return }
+
+        if ($UseParallel) {
+            $Results = $ComputersToProcess | ForEach-Object -Parallel {
+                param($ComputerName,$IncludeRecoveryKey,$BackupMissingADKey,$ADOnly,$AutoEnableBitLocker,$CleanupDuplicateProtectors)
+                & $using:Process-Computer -ComputerName $ComputerName `
+                    -IncludeRecoveryKey:$IncludeRecoveryKey `
+                    -BackupMissingADKey:$BackupMissingADKey `
+                    -ADOnly:$ADOnly `
+                    -AutoEnableBitLocker:$AutoEnableBitLocker `
+                    -CleanupDuplicateProtectors:$CleanupDuplicateProtectors
+            } -ThrottleLimit $ThrottleLimit -ArgumentList $IncludeRecoveryKey,$BackupMissingADKey,$ADOnly,$AutoEnableBitLocker,$CleanupDuplicateProtectors
+        }
+        else {
+            foreach ($c in $ComputersToProcess) {
+                $Results += Process-Computer -ComputerName $c `
+                    -IncludeRecoveryKey:$IncludeRecoveryKey `
+                    -BackupMissingADKey:$BackupMissingADKey `
+                    -ADOnly:$ADOnly `
+                    -AutoEnableBitLocker:$AutoEnableBitLocker `
+                    -CleanupDuplicateProtectors:$CleanupDuplicateProtectors
+            }
+        }
+
+        # Comment out online computers if not ADOnly
+        if (-not $ADOnly) {
+            $OnlineComputers = $Results | Where-Object { $_.Online -eq $true } | Select-Object -ExpandProperty Computer
+            $QueueContent = Get-Content $ComputerList
+            $NewQueue = $QueueContent | ForEach-Object { $line = $_.Trim(); if ($line -and -not $_.StartsWith("#") -and $OnlineComputers -contains $line) { "#$line" } else { $_ } }
+            $NewQueue | Set-Content $ComputerList
+        }
+    }
+    else {
+        # AD filter mode
+        Write-Log "Querying AD with filter: $Filter"
+        $Computers = Get-ADComputer -Filter $Filter | Select-Object -ExpandProperty Name
+        if (-not $Computers) { Write-Log "No computers found for filter."; return }
+
+        if ($UseParallel) {
+            $Results = $Computers | ForEach-Object -Parallel {
+                param($ComputerName,$IncludeRecoveryKey,$BackupMissingADKey,$ADOnly,$AutoEnableBitLocker,$CleanupDuplicateProtectors)
+                & $using:Process-Computer -ComputerName $ComputerName `
+                    -IncludeRecoveryKey:$IncludeRecoveryKey `
+                    -BackupMissingADKey:$BackupMissingADKey `
+                    -ADOnly:$ADOnly `
+                    -AutoEnableBitLocker:$AutoEnableBitLocker `
+                    -CleanupDuplicateProtectors:$CleanupDuplicateProtectors
+            } -ThrottleLimit $ThrottleLimit -ArgumentList $IncludeRecoveryKey,$BackupMissingADKey,$ADOnly,$AutoEnableBitLocker,$CleanupDuplicateProtectors
+        }
+        else {
+            foreach ($c in $Computers) {
+                $Results += Process-Computer -ComputerName $c `
+                    -IncludeRecoveryKey:$IncludeRecoveryKey `
+                    -BackupMissingADKey:$BackupMissingADKey `
+                    -ADOnly:$ADOnly `
+                    -AutoEnableBitLocker:$AutoEnableBitLocker `
+                    -CleanupDuplicateProtectors:$CleanupDuplicateProtectors
+            }
+        }
+    }
+
+    # Export CSV
+    Export-ResultsSafe -Results $Results -Path $OutputPath -Mode $Mode
+    return $Results
+}
+
 
 # ----------------------------
 # Logging helper
@@ -404,230 +621,6 @@ function Export-ResultsSafe {
             $OrderedResults | Export-Csv $Path -NoTypeInformation
         }
     }
-}
-
-
-<#
-.SYNOPSIS
-Generates a BitLocker status and recovery key report for Active Directory computers.
-
-.DESCRIPTION
-Get-ADBitLockerReport queries one or more domain-joined computers and collects:
-
-• Online/WinRM availability
-• BitLocker protection status
-• Encryption percentage
-• TPM presence and readiness
-• Active Directory recovery key information
-
-Optional capabilities include:
-• Automatically enabling BitLocker on eligible devices
-• Backing up missing recovery keys to AD
-• Removing duplicate recovery password protectors
-• Running in AD-only mode (no remote connectivity required)
-• Parallel processing for faster execution
-• Safe CSV export with append or overwrite modes
-
-This cmdlet can operate either:
-• Against all computers matching an AD filter, OR
-• From a supplied text file queue of computer names
-
-Results are exported to CSV and also returned to the pipeline.
-
-.PARAMETER Filter
-Active Directory computer filter.
-Defaults to "*" (all computers).
-
-Examples:
-    -Filter "Name -like 'LAB-*'"
-    -Filter "Name -like 'LT-*'"
-
-.PARAMETER ComputerList
-Path to a text file containing one computer name per line.
-Lines starting with # are ignored.
-Useful for queue-based or retry processing.
-
-.PARAMETER OutputPath
-Path to the CSV report file.
-Default: .\BitLocker_Report.csv
-
-.PARAMETER Mode
-Controls CSV behavior:
-Append     – adds to existing file
-Overwrite  – replaces file
-
-Default: Append
-
-.PARAMETER ThrottleLimit
-Maximum number of parallel threads when running in PowerShell 7+.
-Default: 20
-
-.PARAMETER IncludeRecoveryKey
-Includes the BitLocker recovery password and key ID from AD in the report.
-
-WARNING: Recovery passwords are sensitive information.
-
-.PARAMETER BackupMissingADKey
-If a recovery key exists locally but not in AD, attempts to back it up automatically.
-
-.PARAMETER ADOnly
-Skips all remote connectivity and only checks Active Directory for recovery keys.
-Useful for offline or unreachable machines.
-
-.PARAMETER AutoEnableBitLocker
-Automatically enables BitLocker on eligible machines where:
-• TPM is present
-• TPM is ready
-• BitLocker is not already enabled
-
-.PARAMETER CleanupDuplicateProtectors
-Removes extra recovery password protectors after enabling BitLocker,
-keeping only the newest protector to prevent duplicates.
-
-.EXAMPLE
-Get-ADBitLockerReport
-
-Runs against all domain computers and exports a basic BitLocker status report.
-
-.EXAMPLE
-Get-ADBitLockerReport -Filter "Name -like 'LT-*'" -IncludeRecoveryKey
-
-Reports on all laptops and includes AD recovery passwords.
-
-.EXAMPLE
-Get-ADBitLockerReport -ComputerList .\queue.txt -BackupMissingADKey
-
-Processes only machines in queue.txt and backs up missing recovery keys.
-
-.EXAMPLE
-Get-ADBitLockerReport -Filter "*" -AutoEnableBitLocker
-
-Automatically enables BitLocker on all eligible devices and reports results.
-
-.EXAMPLE
-Get-ADBitLockerReport -Filter "Name -like 'LAB-*'" `
-    -AutoEnableBitLocker `
-    -CleanupDuplicateProtectors `
-    -IncludeRecoveryKey `
-    -Mode Overwrite
-
-Full remediation mode:
-* enables BitLocker
-* removes duplicate protectors
-* includes recovery keys
-* overwrites report
-
-.EXAMPLE
-Get-ADBitLockerReport -ADOnly -IncludeRecoveryKey
-
-Performs an AD-only audit of recovery key presence without contacting endpoints.
-
-.OUTPUTS
-PSCustomObject with:
-Timestamp, Computer, Online, Reported, Volume, Protected, Percent,
-RecoveryKeyID, RecoveryPassword, TPMPresent, TPMReady, CanEnableBitLocker
-
-.NOTES
-Author: Bill Galway
-Module: BitLockerTools
-Requires:
-• ActiveDirectory module
-• BitLocker cmdlets
-• WinRM enabled on targets
-• PowerShell 7+ recommended for parallel processing
-#>
-function Get-ADBitLockerReport {
-    [CmdletBinding()]
-    param(
-        [string]$Filter,
-        [string]$ComputerList,
-        [string]$OutputPath = ".\BitLocker_Report.csv",
-        [ValidateSet("Append","Overwrite")]
-        [string]$Mode = "Append",
-        [int]$ThrottleLimit = 20,
-        [switch]$IncludeRecoveryKey,
-        [switch]$BackupMissingADKey,
-        [switch]$ADOnly,
-        [switch]$AutoEnableBitLocker,
-        [switch]$CleanupDuplicateProtectors
-    )
-
-    $Results = @()
-    $UseParallel = $PSVersionTable.PSVersion.Major -ge 7
-
-    # Prep Filter
-    if ($Filter) { if (-not $Filter.Trim().StartsWith("Name -like")) { $Filter = "Name -like '$Filter'" } } else { $Filter = "*" }
-
-    # Determine computers to process
-    if ($ComputerList) {
-        if (-not (Test-Path $ComputerList)) { Write-Log "Computer list file not found: $ComputerList" "ERROR"; exit 1 }
-        Write-Log "Using queue file: $ComputerList"
-
-        $ComputersToProcess = Get-Content $ComputerList | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith("#") }
-        if (-not $ComputersToProcess) { Write-Log "No computers to process in queue."; return }
-
-        if ($UseParallel) {
-            $Results = $ComputersToProcess | ForEach-Object -Parallel {
-                param($ComputerName,$IncludeRecoveryKey,$BackupMissingADKey,$ADOnly,$AutoEnableBitLocker,$CleanupDuplicateProtectors)
-                & $using:Process-Computer -ComputerName $ComputerName `
-                    -IncludeRecoveryKey:$IncludeRecoveryKey `
-                    -BackupMissingADKey:$BackupMissingADKey `
-                    -ADOnly:$ADOnly `
-                    -AutoEnableBitLocker:$AutoEnableBitLocker `
-                    -CleanupDuplicateProtectors:$CleanupDuplicateProtectors
-            } -ThrottleLimit $ThrottleLimit -ArgumentList $IncludeRecoveryKey,$BackupMissingADKey,$ADOnly,$AutoEnableBitLocker,$CleanupDuplicateProtectors
-        }
-        else {
-            foreach ($c in $ComputersToProcess) {
-                $Results += Process-Computer -ComputerName $c `
-                    -IncludeRecoveryKey:$IncludeRecoveryKey `
-                    -BackupMissingADKey:$BackupMissingADKey `
-                    -ADOnly:$ADOnly `
-                    -AutoEnableBitLocker:$AutoEnableBitLocker `
-                    -CleanupDuplicateProtectors:$CleanupDuplicateProtectors
-            }
-        }
-
-        # Comment out online computers if not ADOnly
-        if (-not $ADOnly) {
-            $OnlineComputers = $Results | Where-Object { $_.Online -eq $true } | Select-Object -ExpandProperty Computer
-            $QueueContent = Get-Content $ComputerList
-            $NewQueue = $QueueContent | ForEach-Object { $line = $_.Trim(); if ($line -and -not $_.StartsWith("#") -and $OnlineComputers -contains $line) { "#$line" } else { $_ } }
-            $NewQueue | Set-Content $ComputerList
-        }
-    }
-    else {
-        # AD filter mode
-        Write-Log "Querying AD with filter: $Filter"
-        $Computers = Get-ADComputer -Filter $Filter | Select-Object -ExpandProperty Name
-        if (-not $Computers) { Write-Log "No computers found for filter."; return }
-
-        if ($UseParallel) {
-            $Results = $Computers | ForEach-Object -Parallel {
-                param($ComputerName,$IncludeRecoveryKey,$BackupMissingADKey,$ADOnly,$AutoEnableBitLocker,$CleanupDuplicateProtectors)
-                & $using:Process-Computer -ComputerName $ComputerName `
-                    -IncludeRecoveryKey:$IncludeRecoveryKey `
-                    -BackupMissingADKey:$BackupMissingADKey `
-                    -ADOnly:$ADOnly `
-                    -AutoEnableBitLocker:$AutoEnableBitLocker `
-                    -CleanupDuplicateProtectors:$CleanupDuplicateProtectors
-            } -ThrottleLimit $ThrottleLimit -ArgumentList $IncludeRecoveryKey,$BackupMissingADKey,$ADOnly,$AutoEnableBitLocker,$CleanupDuplicateProtectors
-        }
-        else {
-            foreach ($c in $Computers) {
-                $Results += Process-Computer -ComputerName $c `
-                    -IncludeRecoveryKey:$IncludeRecoveryKey `
-                    -BackupMissingADKey:$BackupMissingADKey `
-                    -ADOnly:$ADOnly `
-                    -AutoEnableBitLocker:$AutoEnableBitLocker `
-                    -CleanupDuplicateProtectors:$CleanupDuplicateProtectors
-            }
-        }
-    }
-
-    # Export CSV
-    Export-ResultsSafe -Results $Results -Path $OutputPath -Mode $Mode
-    return $Results
 }
 
 Export-ModuleMember -Function Get-ADBitLockerReport
