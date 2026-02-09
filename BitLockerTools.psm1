@@ -301,7 +301,7 @@ function Get-ADBitLockerRecoveryKeys {
 function Enable-BitLockerRemote {
     param(
         [string]$ComputerName,
-        [int]$TimeoutSeconds = 60
+        [int]$TimeoutSeconds = 15
     )
 
     try {
