@@ -882,8 +882,6 @@ function Invoke-ComputerProcess {
             if ($localProtector) {
                 $localPassword = $localProtector.RecoveryPassword
                 $adPasswords   = $ADKeys.RecoveryPassword
-				Write-Log("LocalPassword: $localPassword") -ComputerName $ComputerName
-				Write-Log("AD Password $adPasswords") -ComputerName $ComputerName
         
                 if ($adPasswords -contains $localPassword) {
                     $ADVerified = $true
