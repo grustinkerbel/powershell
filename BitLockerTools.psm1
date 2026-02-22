@@ -719,7 +719,6 @@ function Invoke-BitLockerRemediation {
 
 
     if ($keyInfo.RecoveryKeys -gt 0) {
-        Write-Log "C: already has $($keyInfo.RecoveryKeys) RecoveryPassword protector(s). Skipping AutoEnableBitLocker" -ComputerName $ComputerName
         $CanEnableBitLocker = $false
     }
     else {
