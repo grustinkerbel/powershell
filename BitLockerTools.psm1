@@ -318,7 +318,6 @@ function Get-BitLockerStatusRemote {
     Write-Log "Starting Remote BitLocker Status Query" -ComputerName $ComputerName
 
     try {
-        Write-Log "Invoking Get-BitLockerVolume for C: drive" -ComputerName $ComputerName
         $Status = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
             try {
                 $b = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
@@ -346,9 +345,6 @@ function Get-BitLockerStatusRemote {
         Write-Log "ERROR: Remote BitLocker query failed   - $($_.Exception.Message)" -ComputerName $ComputerName
         return $null
     }
-    finally {
-        Write-Log "Completed Remote BitLocker Status Query" -ComputerName $ComputerName
-    }
 }
 
 # ----------------------------
@@ -371,14 +367,10 @@ function Test-TPM {
 function Get-ADBitLockerRecoveryKeys {
     param([string]$ComputerName)
 
-    Write-Log "Starting Get AD BitLocker Recovery Keys" -ComputerName $ComputerName
-
     try {
-        Write-Log "Looking up AD computer object" -ComputerName $ComputerName
         $Comp = Get-ADComputer -Identity $ComputerName -ErrorAction Stop
 
         Write-Log "Found computer: $($Comp.DistinguishedName)" -ComputerName $ComputerName
-        Write-Log "Searching for Escrowed AD BitLocker recovery objects" -ComputerName $ComputerName
 
         $RecoveryObjects = Get-ADObject `
             -Filter "objectClass -eq 'msFVE-RecoveryInformation'" `
@@ -387,7 +379,7 @@ function Get-ADBitLockerRecoveryKeys {
             -ErrorAction Stop
 
         $KeyCount = ($RecoveryObjects | Measure-Object).Count
-        Write-Log "Found $KeyCount Escrowed BitLocker recovery key(s)" -ComputerName $ComputerName
+        Write-Log "Found $KeyCount Escrowed AD BitLocker recovery key(s)" -ComputerName $ComputerName
 
         return $RecoveryObjects | ForEach-Object {
             [PSCustomObject]@{
@@ -400,9 +392,6 @@ function Get-ADBitLockerRecoveryKeys {
     catch {
         Write-Log "ERROR: Failed to get BitLocker keys   - $($_.Exception.Message)" -ComputerName $ComputerName
         return @()
-    }
-    finally {
-        Write-Log "Completed Get AD BitLocker Recovery Keys" -ComputerName $ComputerName
     }
 }
 
@@ -884,11 +873,11 @@ function Invoke-ComputerProcess {
         
                 if ($adPasswords -contains $localPassword) {
                     $ADVerified = $true
-                    Write-Log "AD escrow matches local recovery key" -ComputerName $ComputerName
+                    Write-Log "Escrowed AD Key matches local Recovery Key" -ComputerName $ComputerName
                 }
                 else {
                     $ADVerified = $false
-                    Write-Log "AD escrow does NOT match local recovery key  " "WARN" -ComputerName $ComputerName
+                    Write-Log "Escrowed AD Key does NOT match local Recovery Key" "WARN" -ComputerName $ComputerName
                 }
             }
         }		
@@ -927,7 +916,6 @@ function Invoke-ComputerProcess {
                 $RecoveryKeyID    = $remediation.RecoveryKeyID
                 $RecoveryPassword = $remediation.RecoveryPassword
             }
-            Write-Log "Escrowed Bitlocker Key to AD: $ADVerified" -ComputerName $ComputerName
         }
     }
 
