@@ -1001,11 +1001,11 @@ function Export-ResultsSafe {
             Volume             = $_.Volume
             Protected          = $_.Protected
             Percent            = $_.Percent
-            RecoveryKeyI       = $_.RecoveryKeyID
+            RecoveryKey        = $_.RecoveryKeyID
 			RecoveryPassword   = $_.RecoveryPassword 
-			#RecoveryKeyID      = if ($_.RecoveryKeyID -is [array]) { $_.RecoveryKeyID -join "; " } else { $_.RecoveryKeyID }
-            #RecoveryPassword   = if ($_.RecoveryPassword -is [array]) { $_.RecoveryPassword -join "; " } else { $_.RecoveryPassword }
-            ADVerified         = [bool]$_.ADVerified
+			MachineKeyCount    = $_.MachineKeyCount
+			ADKeyCount         = $_.ADKeyCount
+            ADVerified         = $_.ADVerified
             TPMPresent         = $_.TPMPresent
             TPMReady           = $_.TPMReady
             CanEnableBitLocker = $_.CanEnableBitLocker
