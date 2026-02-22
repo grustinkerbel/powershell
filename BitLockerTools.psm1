@@ -719,7 +719,7 @@ function Invoke-BitLockerRemediation {
 
 
     if ($keyInfo.RecoveryKeys -gt 0) {
-        $CanEnableBitLocker = $false
+         $CanEnableBitLocker = $false
     }
     else {
         Write-Log "No existing RecoveryPassword protectors found on C:. AutoEnableBitLocker may proceed" -ComputerName $ComputerName
@@ -917,13 +917,6 @@ function Invoke-ComputerProcess {
             ADVerified                 = $ADVerified
             EscrowedADKey              = $ADKeys
 		}
-		Write-Log "REMEDIATION" -ComputerName $ComputerName
-		Write-Log "ComputerName: $ComputerName" -ComputerName $ComputerName
-		Write-Log "CanEnableBitLocker: $CanEnableBitLocker" -ComputerName $ComputerName
-		Write-Log "ProtectionStatus: $ProtectionStatus" -ComputerName $ComputerName
-		#Write-Log "CleanupProtectors: $CleanupProtectors" -ComputerName $ComputerName
-		Write-Log "ADVerified: $ADVerified" -ComputerName $ComputerName
-		#Write-Log "EscrowedADKey: $ADKeys" -ComputerName $ComputerName
 		
         $remediation = Invoke-BitLockerRemediation @params_remediation
         if ($remediation) {
@@ -934,7 +927,7 @@ function Invoke-ComputerProcess {
                 $RecoveryKeyID    = $remediation.RecoveryKeyID
                 $RecoveryPassword = $remediation.RecoveryPassword
             }
-            Write-Log "[Remediation Results] Escrowed Bitlocker Key to AD: $ADVerified" -ComputerName $ComputerName
+            Write-Log "Escrowed Bitlocker Key to AD: $ADVerified" -ComputerName $ComputerName
         }
     }
 
