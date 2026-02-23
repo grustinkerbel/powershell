@@ -804,7 +804,6 @@ function Invoke-ComputerProcess {
     $TPMReady = $false
     $CanEnableBitLocker = $false
     $ADKeys = $null
-    $ADKeys = $null
 
     if (-not $ADOnly) {
 
