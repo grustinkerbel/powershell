@@ -1,3 +1,167 @@
+<#
+.SYNOPSIS
+Generates a BitLocker status and recovery key compliance report for Active Directory computers
+using parallel processing.
+
+.DESCRIPTION
+Invoke-BitLockerParallel queries domain-joined computers and collects:
+
+• WinRM connectivity status
+• BitLocker protection state
+• Encryption percentage
+• TPM presence and readiness
+• Active Directory recovery key information
+
+Optional remediation capabilities include:
+
+• Automatically enabling BitLocker on eligible devices
+• Backing up missing recovery keys to Active Directory
+• Removing duplicate recovery password protectors
+• Performing AD-only audits (no endpoint contact required)
+
+Results are returned to the pipeline and exported to CSV.
+
+This cmdlet supports -WhatIf and -Confirm for safe remediation execution.
+Parallel execution is optimized for PowerShell 7+ using ForEach-Object -Parallel.
+
+.PARAMETER Filter
+Active Directory filter string in standard PowerShell AD syntax.
+
+This parameter is passed directly to Get-ADComputer -Filter.
+
+Examples:
+    "Name -like 'LT-*'"
+    "Enabled -eq 'True'"
+    "OperatingSystem -notlike '*Server*'"
+    "Name -like 'LAB-*' -and Enabled -eq 'True'"
+
+Default: "*"
+
+NOTE:
+This is NOT LDAP filter syntax.
+
+.PARAMETER ComputerList
+Path to a text file containing one computer name per line.
+Lines beginning with # are ignored.
+
+Useful for queue-based processing or retry batches.
+
+.PARAMETER OutputPath
+Path to the CSV report file.
+
+Default: .\BitLocker_Report.csv
+
+.PARAMETER Mode
+Controls CSV export behavior.
+
+Append     – Adds to existing file  
+Overwrite  – Replaces existing file
+
+Default: Append
+
+.PARAMETER ThrottleLimit
+Maximum number of parallel threads when running under PowerShell 7+.
+
+Default: 20
+
+.PARAMETER IncludeRecoveryKey
+Includes the most recent BitLocker recovery password stored in AD
+in the exported report.
+
+WARNING:
+Recovery passwords are exported in plaintext.
+
+.PARAMETER ADOnly
+Performs an Active Directory–only audit of recovery key presence.
+Skips WinRM connectivity and endpoint inspection.
+
+.PARAMETER AutoEnableBitLocker
+Automatically enables BitLocker on eligible machines where:
+
+• BitLocker is not already enabled
+• TPM is present
+• TPM is ready
+• No existing Machine RecoveryPassword protector exists
+
+Supports -WhatIf and -Confirm.
+
+.PARAMETER CleanupProtectors
+Removes older duplicate recovery password protectors,
+keeping only the newest protector.
+
+Supports -WhatIf and -Confirm.
+
+.EXAMPLE
+Invoke-BitLockerParallel
+
+Runs against all domain computers (Filter defaults to "*")
+and exports a BitLocker compliance report.
+
+.EXAMPLE
+Invoke-BitLockerParallel -Filter "Name -like 'LT-*'"
+
+Reports on all laptop devices.
+
+.EXAMPLE
+Invoke-BitLockerParallel -ComputerList .\queue.txt
+
+Processes only machines listed in queue.txt
+and attempts to escrow missing recovery keys.
+
+.EXAMPLE
+Invoke-BitLockerParallel -ADOnly -IncludeRecoveryKey
+
+Performs an AD-only recovery key audit without contacting endpoints.
+
+.EXAMPLE
+Invoke-BitLockerParallel -Filter "Name -like 'LT-*'" `
+    -AutoEnableBitLocker `
+    -CleanupProtectors `
+    -IncludeRecoveryKey `
+    -Mode Overwrite `
+    -Confirm:$false
+
+Full remediation mode:
+• Enables BitLocker where eligible
+• Removes duplicate protectors
+• Includes recovery passwords
+• Overwrites existing report
+
+.OUTPUTS
+PSCustomObject with properties:
+
+Timestamp
+Computer
+Online
+Reported
+Volume
+Protected
+Percent
+RecoveryKeyID
+RecoveryPassword
+ADVerified
+TPMPresent
+TPMReady
+CanEnableBitLocker
+
+.NOTES
+Author: Bill Galway
+Module: BitLockerTools
+Version: 2.0 (Hardened)
+
+Requires:
+• ActiveDirectory module
+• BitLocker cmdlets
+• WinRM enabled on target systems
+• PowerShell 7+ recommended for parallel processing
+
+Supports:
+• -WhatIf
+• -Confirm
+• Parallel execution with ForEach-Object -Parallel
+• Safe CSV export
+#>
+
 function Invoke-BitLockerParallel {
 
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High")]
