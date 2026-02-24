@@ -207,10 +207,15 @@ function Invoke-BitLockerParallel {
     # --------------------------------------------------
     # 2️⃣ Parallel Processing
     # --------------------------------------------------
+	
+	$WhatIfMode = $WhatIfPreference
+	
     $Results = $Computers | ForEach-Object -Parallel {
     
         Import-Module ActiveDirectory -ErrorAction SilentlyContinue
         Import-Module C:\bat\BitlockerRecoveryTools\BitlockerRecoveryTools -Force
+		
+		$WhatIfMode = $using:WhatIfMode
     
         $ComputerName = $_
         $IncludeKey   = $using:IncludeRecoveryKey
@@ -219,14 +224,14 @@ function Invoke-BitLockerParallel {
         $CleanupFlag  = $using:CleanupProtectors
     
         try {
-        
+    
             # ----------------------------
             # AD‑Only Mode
             # ----------------------------
             if ($ADOnlyFlag) {
                 $ADKeys = Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName
                 $ADKeyCount = if ($ADKeys) { $ADKeys.Count } else { 0 }
-        
+    
                 return [PSCustomObject]@{
                     Timestamp          = Get-Date
                     Computer           = $ComputerName
@@ -245,40 +250,40 @@ function Invoke-BitLockerParallel {
                     CanEnableBitLocker = $false
                 }
             }
-        
+    
             # ----------------------------
             # Connectivity Test
             # ----------------------------
             $conn = Test-ComputerConnectivity -ComputerName $ComputerName
             if (-not $conn.Online) { throw "Offline: $($conn.Reason)" }
             if (-not $conn.WinRM)  { throw "WinRM unavailable: $($conn.Reason)" }
-        
+    
             # ----------------------------
             # Remote BitLocker Snapshot
             # ----------------------------
             $status = Get-BitLockerSnapshotRemote -ComputerName $ComputerName
             if (-not $status) { throw "Failed to retrieve BitLocker snapshot" }
-        
+    
             # ----------------------------
             # AD Recovery Keys
             # ----------------------------
             $ADKeys      = Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName
             $ADPasswords = if ($ADKeys) { $ADKeys.RecoveryPassword } else { @() }
             $ADKeyCount  = $ADPasswords.Count
-        
+    
             # ----------------------------
             # TPM Status
             # ----------------------------
             $tpm = Test-TPM -ComputerName $ComputerName
-            
+    
             # ----------------------------
             # Determine Enable Eligibility
             # ----------------------------
-			
-			# Only get MachineKeyCount from Get-CVolumeRecoveryKeyCount
+    
+            # Only get MachineKeyCount from Get-CVolumeRecoveryKeyCount
             $keyInfo = Get-CVolumeRecoveryKeyCount -ComputerName $ComputerName
             $MachineKeyCount = if ($keyInfo) { $keyInfo.Count } else { 0 }
-			
+            
             # Only enable BitLocker if MachineKeyCount is 0
             $CanEnable = ($MachineKeyCount -eq 0)
             
@@ -286,21 +291,27 @@ function Invoke-BitLockerParallel {
             # Optional Auto-Enable
             # ----------------------------
             $BitLockerJustEnabled = $false
+            
             if ($AutoEnable -and $CanEnable) {
-                if ($PSCmdlet.ShouldProcess($ComputerName, "Enable BitLocker")) {
+            
+                if (-not $WhatIfMode) {
+            
                     $EnableResult = Enable-BitLockerRemote -ComputerName $ComputerName
+            
                     if ($EnableResult -and $EnableResult.ProtectionStatus -ne "Off") {
                         $BitLockerJustEnabled = $true
                         Start-Sleep -Seconds 5
-                        # Refresh snapshot after enable
                         $status = Get-BitLockerSnapshotRemote -ComputerName $ComputerName
                     }
+                }
+                else {
+                    Write-Log "WhatIf: Would enable BitLocker" -ComputerName $ComputerName
                 }
             }
             else {
                 Write-Log "Skipping BitLocker enable because MachineKeyCount > 0 or AutoEnable disabled" -ComputerName $ComputerName
             }
-        
+    
             # ----------------------------
             # Determine newest local RecoveryPassword protector
             # ----------------------------
@@ -310,35 +321,35 @@ function Invoke-BitLockerParallel {
             } else {
                 Write-Log "No local RecoveryPassword protectors found" -Level "WARN" -ComputerName $ComputerName
             }
-        
+    
             # ----------------------------
             # Remove Password Protectors Keep Newest
             # ----------------------------
             if ($CleanupFlag) {
                 Remove-ExtraBitLockerProtectors -ComputerName $ComputerName -PSCmdlet $PSCmdlet
             }
-        
+    
             # ----------------------------
             # Backup & Verify (safe logic)
             # ----------------------------
             $BackupResult = $null
-        
+    
             if ($NewestProtector -and
                 -not [string]::IsNullOrWhiteSpace($NewestProtector.RecoveryPassword)) {
-        
+    
                 $localKey = $NewestProtector.RecoveryPassword
                 $IsEscrowed = $ADPasswords -contains $localKey
-        
+    
                 if (-not $IsEscrowed -or $BitLockerJustEnabled) {
                     Write-Log "Backing up BitLocker recovery key" -Level "WARN" -ComputerName $ComputerName
-        
+    
                     $BackupResult = Backup-AndVerifyBitLockerKey `
                                         -ComputerName $ComputerName `
                                         -IncludeRecoveryKey:$IncludeKey
                 }
                 else {
                     Write-Log "Local key already escrowed to AD" -ComputerName $ComputerName
-        
+    
                     $BackupResult = [PSCustomObject]@{
                         ADVerified       = $true
                         RecoveryKeyID    = $NewestProtector.KeyProtectorId.ToString().Trim('{}')
@@ -349,7 +360,7 @@ function Invoke-BitLockerParallel {
             else {
                 Write-Log "No valid RecoveryPassword protector found — skipping escrow check" -Level "WARN" -ComputerName $ComputerName
             }
-        
+    
             # ----------------------------
             # Success Object
             # ----------------------------
@@ -376,7 +387,7 @@ function Invoke-BitLockerParallel {
             # Failure Object
             # ----------------------------
             Write-Log "ERROR: $($_.Exception.Message)" -Level "ERROR" -ComputerName $ComputerName
-        
+    
             [PSCustomObject]@{
                 Timestamp          = Get-Date
                 Computer           = $ComputerName
@@ -394,7 +405,8 @@ function Invoke-BitLockerParallel {
                 TPMReady           = $false
                 CanEnableBitLocker = $false
             }
-		}
+        }
+    
     } -ThrottleLimit $ThrottleLimit
 
     # --------------------------------------------------
@@ -645,33 +657,46 @@ function Get-ADBitLockerRecoveryKeys {
 # Enable Bitlocker
 # ----------------------------
 function Enable-BitLockerRemote {
-    param([string]$ComputerName)
+    [CmdletBinding(SupportsShouldProcess=$true)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ComputerName,
+        [Parameter(Mandatory)]
+        [System.Management.Automation.PSCmdlet]$PSCmdlet
+    )
 
     Write-Log "Starting Enable BitLocker Remote" -ComputerName $ComputerName
 
     try {
         $result = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            param($PSCmdlet)
 
             $mount = "C:"
             $rebootRequired = $false
 
             $vol = Get-BitLockerVolume -MountPoint $mount -ErrorAction Stop | Select-Object -First 1
-            if ($null -eq $vol) {
-                throw "Volume $mount not found"
-            }
+            if ($null -eq $vol) { throw "Volume $mount not found" }
 
             # Resume if suspended
             if ($vol.VolumeStatus -eq "Suspended") {
-                Resume-BitLocker -MountPoint $mount -ErrorAction Stop
-                Start-Sleep 3
+                if ($PSCmdlet -and $PSCmdlet.ShouldProcess("$env:COMPUTERNAME", "Resume BitLocker on $mount")) {
+                    Resume-BitLocker -MountPoint $mount -ErrorAction Stop
+                    Start-Sleep 3
+                } else {
+                    Write-Host "WhatIf: Would resume BitLocker on $mount"
+                }
             }
 
-            # Enable BitLocker if protection is off (0 = Off)
+            # Enable BitLocker if protection is off
             if ($vol.ProtectionStatus -eq "Off") {
-                Enable-BitLocker -MountPoint $mount `
-                                 -EncryptionMethod XtsAes256 `
-                                 -RecoveryPasswordProtector `
-                                 -Confirm:$false -ErrorAction Stop | Out-Null
+                if ($PSCmdlet -and $PSCmdlet.ShouldProcess("$env:COMPUTERNAME", "Enable BitLocker on $mount")) {
+                    Enable-BitLocker -MountPoint $mount `
+                                     -EncryptionMethod XtsAes256 `
+                                     -RecoveryPasswordProtector `
+                                     -Confirm:$false -ErrorAction Stop | Out-Null
+                } else {
+                    Write-Host "WhatIf: Would enable BitLocker on $mount"
+                }
             }
 
             # Return current status
@@ -683,8 +708,8 @@ function Enable-BitLockerRemote {
                 RebootRequired   = $rebootRequired
             }
 
-        } -ErrorAction Stop | Select-Object -First 1
-      
+        } -ArgumentList $PSCmdlet -ErrorAction Stop | Select-Object -First 1
+
         Write-Log "BitLocker operation completed on $ComputerName" -ComputerName $ComputerName
         return $result
     }
@@ -737,7 +762,7 @@ function Ensure-BitLockerAndEscrow {
 
             $EnableResult = Enable-BitLockerRemote -ComputerName $ComputerName
 
-            if ($EnableResult -and $EnableResult.ProtectionStatus -ne "Off") {
+            if (-not $WhatIfMode) {
                 Write-Log "BitLocker enabled successfully" -ComputerName $ComputerName
                 $BitLockerJustEnabled = $true
 
