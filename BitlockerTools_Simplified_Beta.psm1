@@ -99,11 +99,6 @@ function Invoke-BitLockerParallel {
             if (-not $status) { throw "Failed to retrieve BitLocker snapshot" }
         
             # ----------------------------
-            # Machine Recovery Key Count
-            # ----------------------------
-            $MachineKeyCount = if ($status.Protectors) { $status.Protectors.Count } else { 0 }
-        
-            # ----------------------------
             # AD Recovery Keys
             # ----------------------------
             $ADKeys      = Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName
@@ -114,16 +109,15 @@ function Invoke-BitLockerParallel {
             # TPM Status
             # ----------------------------
             $tpm = Test-TPM -ComputerName $ComputerName
-        
-            # ----------------------------
-            # Determine Machine Recovery Key Count
-            # ----------------------------
-            $keyInfo        = Get-CVolumeRecoveryKeyCount -ComputerName $ComputerName
-            $MachineKeyCount = if ($keyInfo) { $keyInfo.Count } else { 0 }
             
             # ----------------------------
             # Determine Enable Eligibility
             # ----------------------------
+			
+			# Only get MachineKeyCount from Get-CVolumeRecoveryKeyCount
+            $keyInfo = Get-CVolumeRecoveryKeyCount -ComputerName $ComputerName
+            $MachineKeyCount = if ($keyInfo) { $keyInfo.Count } else { 0 }
+			
             # Only enable BitLocker if MachineKeyCount is 0
             $CanEnable = ($MachineKeyCount -eq 0)
             Write-Log "DEBUG: AutoEnable=$AutoEnable  CanEnable=$CanEnable  MachineKeyCount=$MachineKeyCount" -ComputerName $ComputerName
@@ -152,7 +146,7 @@ function Invoke-BitLockerParallel {
             # ----------------------------
             $NewestProtector = $status.NewestRecovery
             if ($NewestProtector) {
-                Write-Log "Newest local RecoveryPassword protector: $($NewestProtector.KeyProtectorId)" -ComputerName $ComputerName
+                Write-Log "Newest local RecoveryPassword protector ID: $($NewestProtector.KeyProtectorId)" -ComputerName $ComputerName
             } else {
                 Write-Log "No local RecoveryPassword protectors found" -Level "WARN" -ComputerName $ComputerName
             }
@@ -183,7 +177,7 @@ function Invoke-BitLockerParallel {
                                         -IncludeRecoveryKey:$IncludeKey
                 }
                 else {
-                    Write-Log "Local key already escrowed to AD — no backup needed" -ComputerName $ComputerName
+                    Write-Log "Local key already escrowed to AD" -ComputerName $ComputerName
         
                     $BackupResult = [PSCustomObject]@{
                         ADVerified       = $true
@@ -478,37 +472,6 @@ function Get-ADBitLockerRecoveryKeys {
     }
 }
 
-function Test-BitLockerEscrowStatus {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$ComputerName,
-
-        [Parameter(Mandatory)]
-        [string]$RecoveryPassword,
-
-        [Parameter(Mandatory)]
-        [array]$ADKeys
-    )
-
-    $adPasswords = $ADKeys | ForEach-Object { $_.'msFVE-RecoveryPassword' }
-
-    if ($adPasswords -contains $RecoveryPassword) {
-        Write-Log "Local BitLocker key is already escrowed to AD" -ComputerName $ComputerName
-        return [PSCustomObject]@{
-            Escrowed    = $true
-            NeedsBackup = $false
-        }
-    }
-
-    Write-Log "Local BitLocker key NOT found in AD — backup required" -Level "WARN" -ComputerName $ComputerName
-
-    return [PSCustomObject]@{
-        Escrowed    = $false
-        NeedsBackup = $true
-    }
-}
-
 # ----------------------------
 # Enable Bitlocker
 # ----------------------------
@@ -724,7 +687,7 @@ function Backup-AndVerifyBitLockerKey {
         [PSCustomObject]$Snapshot  # optional, pass from parallel block to avoid re-query
     )
 
-    Write-Log "Retrieving BitLocker snapshot for backup" -ComputerName $ComputerName
+    Write-Log "Retrieving Local BitLocker Keys for backup" -ComputerName $ComputerName
 
     # Use passed snapshot or fetch new
     if (-not $Snapshot) {
@@ -920,5 +883,4 @@ Export-ModuleMember -Function `
     Export-ResultsSafe, `
     Invoke-BitLockerParallel, `
     Enable-BitLockerRemote,
-	Test-BitLockerEscrowStatus,
 	Get-BitLockerSnapshotRemote
