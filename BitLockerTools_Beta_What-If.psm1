@@ -549,30 +549,32 @@ function Get-BitLockerSnapshotRemote {
         [string]$ComputerName
     )
 
-    Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+    $snapshot = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
         try {
-            # Get BitLocker volume
-            $vol = Get-BitLockerVolume -MountPoint 'C:' -ErrorAction Stop
+            $vol = Get-BitLockerVolume -MountPoint 'C:' -ErrorAction Stop | Select-Object -First 1
 
-            # Extract protectors
-            $all = $vol.KeyProtector
-            $rp  = $all | Where-Object { $_.KeyProtectorType -eq 'RecoveryPassword' }
+            # Only valid RecoveryPassword protectors
+            $rp = @($vol.KeyProtector | Where-Object {
+                $_.KeyProtectorType -eq 'RecoveryPassword' -and $_.KeyProtectorId -ne $null
+            })
 
-            # Newest RecoveryPassword protector
-            $Newest = $rp | Sort-Object -Property KeyProtectorId -Descending | Select-Object -First 1
+            # Newest RecoveryPassword protector (if any)
+            $Newest = if ($rp.Count -gt 0) {
+                $rp | Sort-Object -Property CreationTime -Descending | Select-Object -First 1
+            } else { $null }
 
-            # TPM info (optional but recommended)
+            # TPM info (optional)
             $tpm = $null
             try { $tpm = Get-Tpm } catch {}
 
-            # Return snapshot object
             [PSCustomObject]@{
                 Volume             = $vol
                 ProtectionStatus   = $vol.ProtectionStatus
                 EncryptionPercent  = $vol.EncryptionPercentage
-                Protectors         = $all
+                Protectors         = $vol.KeyProtector
                 RecoveryProtectors = $rp
                 NewestRecovery     = $Newest
+                MachineKeyCount    = $rp.Count
                 TPM                = $tpm
             }
         }
@@ -580,6 +582,13 @@ function Get-BitLockerSnapshotRemote {
             $null
         }
     }
+
+    # ----------------------------
+    # Unwrap remoting array if single object
+    # ----------------------------
+    if ($snapshot.Count -eq 1) { $snapshot = $snapshot[0] }
+
+    return $snapshot
 }
 
 
@@ -949,24 +958,19 @@ function Get-CVolumeRecoveryKeyCount {
     $retryDelay = 3  # seconds
 
     # ----------------------------
-    # 1. Try Get-BitLockerSnapshotRemote (preferred)
+    # 1️⃣ Try Get-BitLockerSnapshotRemote (preferred)
     # ----------------------------
     $snapshot = $null
-
     for ($i = 1; $i -le $maxRetries; $i++) {
-
         $snapshot = Get-BitLockerSnapshotRemote -ComputerName $ComputerName
-
-        # Success if we got protector info
         if ($snapshot -and $snapshot.RecoveryProtectors) { break }
-
         Start-Sleep -Seconds $retryDelay
     }
 
-    if ($snapshot -and $snapshot.RecoveryProtectors) {
-
-        $count  = $snapshot.RecoveryProtectors.Count
-        $prot   = $snapshot.ProtectionStatus
+    if ($snapshot) {
+        # Count only valid RecoveryPassword protectors
+        $count = if ($snapshot.RecoveryProtectors) { $snapshot.RecoveryProtectors.Count } else { 0 }
+        $prot  = $snapshot.ProtectionStatus
 
         if ($Raw) { return $count }
 
@@ -977,7 +981,7 @@ function Get-CVolumeRecoveryKeyCount {
     }
 
     # ----------------------------
-    # 2. Fallback to manage-bde
+    # 2️⃣ Fallback to manage-bde if snapshot failed or returned nothing
     # ----------------------------
     function Get-BdeProtectorCount {
         Invoke-Command -ComputerName $ComputerName -ScriptBlock {
@@ -986,13 +990,12 @@ function Get-CVolumeRecoveryKeyCount {
                 ($output | Select-String -Pattern "Numerical Password" -SimpleMatch).Count
             }
             catch {
-                $null
+                0
             }
         }
     }
 
     $bdeCount = $null
-
     for ($i = 1; $i -le $maxRetries; $i++) {
         $bdeCount = Get-BdeProtectorCount
         if ($bdeCount -ne $null) { break }
@@ -1002,7 +1005,7 @@ function Get-CVolumeRecoveryKeyCount {
     if ($Raw) { return $bdeCount }
 
     return [PSCustomObject]@{
-        Count            = $bdeCount
+        Count            = if ($bdeCount) { $bdeCount } else { 0 }
         ProtectionStatus = "Unknown"
     }
 }
