@@ -325,8 +325,14 @@ function Invoke-BitLockerParallel {
             # ----------------------------
             # Remove Password Protectors Keep Newest
             # ----------------------------
+
+
+
+
             if ($CleanupFlag) {
-                Remove-ExtraBitLockerProtectors -ComputerName $ComputerName -PSCmdlet $PSCmdlet
+				Remove-ExtraBitLockerProtectors `
+				-ComputerName $ComputerName `
+				-WhatIfMode:$WhatIfMode
             }
     
             # ----------------------------
@@ -689,13 +695,13 @@ function Enable-BitLockerRemote {
 
             # Enable BitLocker if protection is off
             if ($vol.ProtectionStatus -eq "Off") {
-                if ($PSCmdlet -and $PSCmdlet.ShouldProcess("$env:COMPUTERNAME", "Enable BitLocker on $mount")) {
+                if (-not $WhatIfMode) {
                     Enable-BitLocker -MountPoint $mount `
                                      -EncryptionMethod XtsAes256 `
                                      -RecoveryPasswordProtector `
                                      -Confirm:$false -ErrorAction Stop | Out-Null
                 } else {
-                    Write-Host "WhatIf: Would enable BitLocker on $mount"
+                    Write-Log "WhatIf: Would remove BitLocker key $id" -ComputerName $ComputerName
                 }
             }
 
@@ -811,80 +817,69 @@ function Ensure-BitLockerAndEscrow {
 }
 
 # ----------------------------
-# Remove extra recovery protectors (keep newest) — safe for -WhatIf
+# Remove extra recovery protectors (keep newest)
 # ----------------------------
 function Remove-ExtraBitLockerProtectors {
+
     param(
         [string]$ComputerName,
-        [Parameter()]$PSCmdlet
+        [bool]$WhatIfMode
     )
 
     try {
-        # 1️⃣ Get local snapshot
+
         $vol = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
             Get-BitLockerVolume -MountPoint "C:" | Select-Object -First 1
         }
 
-        $passwords = @($vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" })
-        if ($passwords.Count -le 1) { return }
+        $passwords = @($vol.KeyProtector | Where-Object {
+            $_.KeyProtectorType -eq "RecoveryPassword"
+        })
 
-        # Identify newest protector
-        $keep = $passwords | Sort-Object CreationTime -Descending | Select-Object -First 1
-
-        # Precompute ShouldProcess flags
-        $doBackup = $false
-        if ($PSCmdlet) {
-            $doBackup = $PSCmdlet.ShouldProcess(
-                "$ComputerName", "Backup newest BitLocker key $($keep.KeyProtectorId)"
-            )
+        if ($passwords.Count -le 1) {
+            Write-Log "No duplicate protectors found." -ComputerName $ComputerName
+            return
         }
 
-        # 2️⃣ Backup newest key if allowed
-        Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-            param($KeepID, $DoBackup)
-            if ($DoBackup) {
-                Backup-BitLockerKeyProtector -MountPoint "C:" -KeyProtectorId $KeepID
-            } else {
-                Write-Host "Skipping backup of newest key $KeepID due to -WhatIf/confirmation."
-            }
-        } -ArgumentList $keep.KeyProtectorId, $doBackup
+        $keep = $passwords |
+            Sort-Object CreationTime -Descending |
+            Select-Object -First 1
 
-        # 3️⃣ Verify KeepID exists in AD before deleting others
-        $adObject = Get-ADObject -Filter "objectClass -eq 'msFVE-RecoveryInformation'" `
-                                 -Properties msFVE-RecoveryGuid `
-                                 -SearchBase (Get-ADComputer $ComputerName).DistinguishedName |
-                    Where-Object { $_.Name -like "*$($keep.KeyProtectorId)*" }
+        Write-Log "Keeping newest protector $($keep.KeyProtectorId)" -ComputerName $ComputerName
 
-        if ($adObject) {
-            Write-Log "Verified: Newest key found in AD. Proceeding with cleanup." -ComputerName $ComputerName
+        # Verify newest exists in AD
+        $adObject = Get-ADObject `
+            -Filter "objectClass -eq 'msFVE-RecoveryInformation'" `
+            -SearchBase (Get-ADComputer $ComputerName).DistinguishedName |
+            Where-Object { $_.Name -like "*$($keep.KeyProtectorId)*" }
 
-            # Precompute deletion flags
-            $deletionFlags = @{}
-            foreach ($id in $passwords.KeyProtectorId) {
-                if ($id -ne $keep.KeyProtectorId) {
-                    $deletionFlags[$id] = $PSCmdlet -and $PSCmdlet.ShouldProcess("$ComputerName", "Remove BitLocker key $id")
-                }
-            }
-
-            # 4️⃣ Remove older keys remotely
-            Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-                param($AllIDs, $KeepID, $DeletionFlags)
-                foreach ($id in $AllIDs) {
-                    if ($id -ne $KeepID) {
-                        if ($DeletionFlags[$id]) {
-                            Remove-BitLockerKeyProtector -MountPoint "C:" -KeyProtectorId $id
-                        } else {
-                            Write-Host "Skipping removal of key $id due to -WhatIf/confirmation."
-                        }
-                    }
-                }
-            } -ArgumentList $passwords.KeyProtectorId, $keep.KeyProtectorId, $deletionFlags
-        } else {
-            Write-Log "ABORT: Newest key NOT found in AD. Cleanup skipped for safety." "WARN" -ComputerName $ComputerName
+        if (-not $adObject) {
+            Write-Log "ABORT: Newest key not found in AD. Cleanup skipped." -Level WARN -ComputerName $ComputerName
+            return
         }
 
-    } catch {
-        Write-Log "Cleanup failed on $ComputerName : $_" "ERROR" -ComputerName $ComputerName
+        foreach ($id in $passwords.KeyProtectorId) {
+
+            if ($id -ne $keep.KeyProtectorId) {
+
+                if (-not $WhatIfMode) {
+
+                    Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+                        param($RemoveID)
+                        Remove-BitLockerKeyProtector -MountPoint "C:" -KeyProtectorId $RemoveID
+                    } -ArgumentList $id
+
+                    Write-Log "Removed protector $id" -ComputerName $ComputerName
+                }
+                else {
+                    Write-Log "WhatIf: Would remove protector $id" -ComputerName $ComputerName
+                }
+            }
+        }
+
+    }
+    catch {
+        Write-Log "Cleanup failed on $ComputerName : $_" -Level ERROR -ComputerName $ComputerName
     }
 }
 
@@ -913,7 +908,7 @@ function Backup-AndVerifyBitLockerKey {
     # Newest RecoveryPassword protector
     $NewestProtector = $Snapshot.NewestRecovery
     if (-not $NewestProtector) {
-        Write-Log "ERROR: No RecoveryPassword protector found" -Level "ERROR" -ComputerName $ComputerName
+        Write-Log "No RecoveryPassword protector found" -Level "ERROR" -ComputerName $ComputerName
         return
     }
 
