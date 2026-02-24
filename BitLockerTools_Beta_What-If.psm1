@@ -326,13 +326,14 @@ function Invoke-BitLockerParallel {
             # Remove Password Protectors Keep Newest
             # ----------------------------
 
-
-
-
             if ($CleanupFlag) {
-				Remove-ExtraBitLockerProtectors `
-				-ComputerName $ComputerName `
-				-WhatIfMode:$WhatIfMode
+            
+                if (-not $WhatIfMode) {
+                    Remove-ExtraBitLockerProtectors -ComputerName $ComputerName
+                }
+                else {
+                    Write-Log "WhatIf: Would remove extra BitLocker protectors" -ComputerName $ComputerName
+                }
             }
     
             # ----------------------------
@@ -342,29 +343,24 @@ function Invoke-BitLockerParallel {
     
             if ($NewestProtector -and
                 -not [string]::IsNullOrWhiteSpace($NewestProtector.RecoveryPassword)) {
-    
-                $localKey = $NewestProtector.RecoveryPassword
-                $IsEscrowed = $ADPasswords -contains $localKey
-    
-                if (-not $IsEscrowed -or $BitLockerJustEnabled) {
-                    Write-Log "Backing up BitLocker recovery key" -Level "WARN" -ComputerName $ComputerName
-    
+            
+                if (-not $WhatIfMode) {
+            
+                    Write-Log "Backing up BitLocker recovery key" -ComputerName $ComputerName
+            
                     $BackupResult = Backup-AndVerifyBitLockerKey `
                                         -ComputerName $ComputerName `
                                         -IncludeRecoveryKey:$IncludeKey
                 }
                 else {
-                    Write-Log "Local key already escrowed to AD" -ComputerName $ComputerName
-    
+                    Write-Log "WhatIf: Would backup recovery key to AD" -ComputerName $ComputerName
+            
                     $BackupResult = [PSCustomObject]@{
-                        ADVerified       = $true
-                        RecoveryKeyID    = $NewestProtector.KeyProtectorId.ToString().Trim('{}')
-                        RecoveryPassword = if ($IncludeKey) { $localKey } else { $null }
+                        ADVerified       = $false
+                        RecoveryKeyID    = $NewestProtector.KeyProtectorId
+                        RecoveryPassword = $null
                     }
                 }
-            }
-            else {
-                Write-Log "No valid RecoveryPassword protector found — skipping escrow check" -Level "WARN" -ComputerName $ComputerName
             }
     
             # ----------------------------
@@ -663,12 +659,8 @@ function Get-ADBitLockerRecoveryKeys {
 # Enable Bitlocker
 # ----------------------------
 function Enable-BitLockerRemote {
-    [CmdletBinding(SupportsShouldProcess=$true)]
     param(
-        [Parameter(Mandatory)]
-        [string]$ComputerName,
-        [Parameter(Mandatory)]
-        [System.Management.Automation.PSCmdlet]$PSCmdlet
+        [string]$ComputerName
     )
 
     Write-Log "Starting Enable BitLocker Remote" -ComputerName $ComputerName
@@ -701,7 +693,7 @@ function Enable-BitLockerRemote {
                                      -RecoveryPasswordProtector `
                                      -Confirm:$false -ErrorAction Stop | Out-Null
                 } else {
-                    Write-Log "WhatIf: Would remove BitLocker key $id" -ComputerName $ComputerName
+                    Write-Log "WhatIf: Would remove BitLocker key $NewestProtector.KeyProtectorId" -ComputerName $ComputerName
                 }
             }
 
@@ -728,7 +720,7 @@ function Enable-BitLockerRemote {
 
 
 function Ensure-BitLockerAndEscrow {
-    [CmdletBinding(SupportsShouldProcess)]
+
     param(
         [Parameter(Mandatory)][string]$ComputerName,
         [Parameter()][switch]$IncludeRecoveryKey,
@@ -762,21 +754,20 @@ function Ensure-BitLockerAndEscrow {
     $CanEnable = ($Snapshot.ProtectionStatus -eq "Off")
 
     if ($AutoEnable -and $CanEnable) {
-        if ($PSCmdlet.ShouldProcess($ComputerName, "Enable BitLocker")) {
-
-            Write-Log "Auto-enabling BitLocker on $ComputerName" -ComputerName $ComputerName
-
+    
+        if (-not $WhatIfMode) {
+    
+            Write-Log "Enabling BitLocker" -ComputerName $ComputerName
+    
             $EnableResult = Enable-BitLockerRemote -ComputerName $ComputerName
-
-            if (-not $WhatIfMode) {
-                Write-Log "BitLocker enabled successfully" -ComputerName $ComputerName
-                $BitLockerJustEnabled = $true
-
-                # Refresh snapshot after enable
+    
+            if ($EnableResult) {
                 Start-Sleep -Seconds 5
-                $Snapshot = Get-BitLockerSnapshotRemote -ComputerName $ComputerName
-                $NewestProtector = $Snapshot.NewestRecovery
+                $status = Get-BitLockerSnapshotRemote -ComputerName $ComputerName
             }
+        }
+        else {
+            Write-Log "WhatIf: Would enable BitLocker" -ComputerName $ComputerName
         }
     }
 
@@ -884,13 +875,12 @@ function Remove-ExtraBitLockerProtectors {
 }
 
 function Backup-AndVerifyBitLockerKey {
-    [CmdletBinding()]
+
     param(
         [string]$ComputerName,
         [string]$MountPoint = "C:",
         [switch]$IncludeRecoveryKey,
-        [PSCustomObject]$Snapshot,          # optional, pass from parallel block
-        [Parameter()]$PSCmdlet               # optional, used for -WhatIf/-Confirm
+        [PSCustomObject]$Snapshot
     )
 
     Write-Log "Retrieving local BitLocker keys for backup" -ComputerName $ComputerName
