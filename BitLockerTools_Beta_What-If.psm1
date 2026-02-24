@@ -218,8 +218,6 @@ function Invoke-BitLockerParallel {
         $AutoEnable   = $using:AutoEnableBitLocker
         $CleanupFlag  = $using:CleanupProtectors
     
-        Write-Log "DEBUG: Loaded module version: $((Get-Module BitlockerRecoveryTools).Version)" -ComputerName $ComputerName
-    
         try {
         
             # ----------------------------
@@ -283,7 +281,6 @@ function Invoke-BitLockerParallel {
 			
             # Only enable BitLocker if MachineKeyCount is 0
             $CanEnable = ($MachineKeyCount -eq 0)
-            Write-Log "DEBUG: AutoEnable=$AutoEnable  CanEnable=$CanEnable  MachineKeyCount=$MachineKeyCount" -ComputerName $ComputerName
             
             # ----------------------------
             # Optional Auto-Enable
