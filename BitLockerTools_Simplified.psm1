@@ -146,7 +146,6 @@ function Invoke-BitLockerParallel {
             # ----------------------------
             # Optional Auto-Enable
             # ----------------------------
-			Write-Log "DEBUG: AutoEnable=$AutoEnable  CanEnable=$CanEnable" -ComputerName $ComputerName
             if ($AutoEnable -and $CanEnable) {
                 if ($PSCmdlet.ShouldProcess($ComputerName, "Enable BitLocker")) {
                     Enable-BitLockerRemote -ComputerName $ComputerName | Out-Null
