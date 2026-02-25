@@ -55,8 +55,6 @@ function Invoke-BitLockerParallel {
         $AutoEnable   = $using:AutoEnableBitLocker
         $CleanupFlag  = $using:CleanupProtectors
     
-        Write-Log "DEBUG: Loaded module version: $((Get-Module BitlockerRecoveryTools).Version)" -ComputerName $ComputerName
-    
         try {
     
             # ----------------------------
@@ -129,7 +127,6 @@ function Invoke-BitLockerParallel {
             # ----------------------------
             # Optional Auto-Enable
             # ----------------------------
-			Write-Log "DEBUG: AutoEnable=$AutoEnable  CanEnable=$CanEnable" -ComputerName $ComputerName
             if ($AutoEnable -and $CanEnable) {
                 if ($PSCmdlet.ShouldProcess($ComputerName, "Enable BitLocker")) {
                     Enable-BitLockerRemote -ComputerName $ComputerName | Out-Null
@@ -157,42 +154,41 @@ function Invoke-BitLockerParallel {
 			}
 
             # ----------------------------
-            # Optional Backup & Verify (safe logic)
+            # Optional Backup & Verify
             # ----------------------------
             $BackupResult = $null
             
-            if ($IncludeKey) {
+            $localKey = $NewestProtector.RecoveryPassword
             
-                if ($NewestProtector -and
-                    -not [string]::IsNullOrWhiteSpace($NewestProtector.RecoveryPassword)) {
+            # Normalize both sides
+            $NormalizedLocalPassword = $localKey.Trim()
             
-                    $localKey = $NewestProtector.RecoveryPassword
+            $NormalizedADPasswords = $ADKeys.RecoveryPassword |
+                ForEach-Object { $_.Trim() }
             
-                    # Compare local key to AD using the CLEAN helper output
-                    $adPasswords = $ADKeys.RecoveryPassword
+            # Already escrowed?
+            if ($NormalizedADPasswords -contains $NormalizedLocalPassword) {
             
-                    if ($adPasswords -contains $localKey) {
-                        Write-Log "Local key already escrowed to AD — no backup needed" -ComputerName $ComputerName
+                Write-Log "Local key already escrowed to AD — no backup needed" -ComputerName $ComputerName
             
-                        $BackupResult = [PSCustomObject]@{
-                            ADVerified       = $true
-                            RecoveryKeyID    = $NewestProtector.KeyProtectorId.ToString().Trim('{}')
-                            RecoveryPassword = $localKey
-                        }
-                    }
-                    else {
-                        Write-Log "Local key missing from AD — performing backup" -Level "WARN" -ComputerName $ComputerName
-            
-                        $BackupResult = Backup-AndVerifyBitLockerKey `
-                                            -ComputerName $ComputerName `
-                                            -IncludeRecoveryKey:$IncludeKey
-                    }
-                }
-                else {
-                    Write-Log "No valid RecoveryPassword protector found — skipping escrow check" -Level "WARN" -ComputerName $ComputerName
+                $BackupResult = [PSCustomObject]@{
+                    RecoveryKeyID    = $NewestProtector.KeyProtectorId.ToString().Trim('{}')
+                    ADVerified       = $true
+                    RecoveryPassword = $localKey
                 }
             }
-    
+            else {
+                Write-Log "Local key missing from AD — performing backup" -Level "WARN" -ComputerName $ComputerName
+            
+                $BackupResult = Backup-AndVerifyBitLockerKey `
+                                    -ComputerName $ComputerName `
+                                    -KeyProtectorId $NewestProtector.KeyProtectorId `
+                                    -RecoveryPassword $localKey `
+                                    -IncludeRecoveryKey:$IncludeKey
+            }
+
+
+
             # ----------------------------
             # Success Object
             # ----------------------------
@@ -627,77 +623,59 @@ function Backup-AndVerifyBitLockerKey {
     [CmdletBinding()]
     param(
         [string]$ComputerName,
+        [Parameter(Mandatory)]
+        [string]$KeyProtectorId,
+        [Parameter(Mandatory)]
+        [string]$RecoveryPassword,
         [string]$MountPoint = "C:",
         [switch]$IncludeRecoveryKey
     )
 
-    Write-Log "Retrieving BitLocker snapshot for backup" -ComputerName $ComputerName
+    Write-Log "Backing up BitLocker key protector $KeyProtectorId" -ComputerName $ComputerName
 
-    # Use the new optimized snapshot helper
-    $Snapshot = Get-BitLockerSnapshotRemote -ComputerName $ComputerName
-
-    if (-not $Snapshot) {
-        Write-Log "ERROR: Failed to retrieve BitLocker snapshot" -Level "ERROR" -ComputerName $ComputerName
-        return
-    }
-
-    # Newest RecoveryPassword protector (live CIM object)
-    $NewestProtector = $Snapshot.NewestRecovery
-
-    if (-not $NewestProtector) {
-        Write-Log "ERROR: No RecoveryPassword protector found" -Level "ERROR" -ComputerName $ComputerName
-        return
-    }
-
-    $RecoveryKeyID    = $NewestProtector.KeyProtectorId.ToString().Trim('{}')
-    $RecoveryPassword = $NewestProtector.RecoveryPassword
-    $ADVerified       = $false
-
-    Write-Log "Starting backup of newest BitLocker recovery key (ID: $RecoveryKeyID)" -ComputerName $ComputerName
+    $ADVerified = $false
 
     try {
-        # Backup the protector remotely
+        # Perform the backup remotely
         Invoke-Command -ComputerName $ComputerName -ScriptBlock {
             param($MP, $KPID)
             Backup-BitLockerKeyProtector -MountPoint $MP -KeyProtectorId $KPID -ErrorAction Stop | Out-Null
-        } -ArgumentList $MountPoint, $NewestProtector.KeyProtectorId -ErrorAction Stop
+        } -ArgumentList $MountPoint, $KeyProtectorId -ErrorAction Stop
 
         # Allow AD replication
-        Start-Sleep -Seconds 15
+        Start-Sleep -Seconds 10
 
-
-        # ----------------------------
-        # AD Recovery Keys
-        # ----------------------------
+        # Retrieve AD recovery keys
         $ADKeys = Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName
-        $ADKeyCount = if ($ADKeys) { $ADKeys.Count } else { 0 }
 
+        # Only trim AD side (parallel block already normalized local password)
+        $NormalizedADPasswords = $ADKeys.RecoveryPassword |
+            ForEach-Object { $_.Trim() }
 
-
-        # Compare clean strings
-        if ($adPasswords -contains $RecoveryPassword) {
+        # Compare normalized values
+        if ($NormalizedADPasswords -contains $RecoveryPassword) {
             $ADVerified = $true
-            Write-Log "Escrowed Recovery key verified in AD" -ComputerName $ComputerName
+            Write-Log "Escrow verified in AD for protector $KeyProtectorId" -ComputerName $ComputerName
         }
         else {
-            Write-Log "Recovery key NOT found in AD after backup!" -Level "WARN" -ComputerName $ComputerName
+            Write-Log "WARNING: Escrow not found in AD after backup for protector $KeyProtectorId" -Level "WARN" -ComputerName $ComputerName
         }
     }
     catch {
-        Write-Log "ERROR: Failed to back up/verify : $($_.Exception.Message)" -Level "ERROR" -ComputerName $ComputerName
+        Write-Log "ERROR: Backup failed for protector $KeyProtectorId : $($_.Exception.Message)" -Level "ERROR" -ComputerName $ComputerName
     }
 
-    # Construct result object
-    $properties = [ordered]@{
-        RecoveryKeyID = $RecoveryKeyID
-        ADVerified    = [bool]$ADVerified
+    # Construct return object
+    $props = [ordered]@{
+        RecoveryKeyID = $KeyProtectorId
+        ADVerified    = $ADVerified
     }
 
     if ($IncludeRecoveryKey) {
-        $properties.RecoveryPassword = $RecoveryPassword
+        $props.RecoveryPassword = $RecoveryPassword
     }
 
-    return [PSCustomObject]$properties
+    return [PSCustomObject]$props
 }
 
 function Get-CVolumeRecoveryKeyCount {
