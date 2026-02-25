@@ -55,6 +55,8 @@ function Invoke-BitLockerParallel {
         $AutoEnable   = $using:AutoEnableBitLocker
         $CleanupFlag  = $using:CleanupProtectors
     
+        Write-Log "DEBUG: Loaded module version: $((Get-Module BitlockerRecoveryTools).Version)" -ComputerName $ComputerName
+    
         try {
     
             # ----------------------------
@@ -107,12 +109,29 @@ function Invoke-BitLockerParallel {
             # ----------------------------
             $keyInfo = Get-CVolumeRecoveryKeyCount -ComputerName $ComputerName
             $MachineKeyCount = if ($keyInfo) { $keyInfo.Count } else { 0 }
-    
-            # ----------------------------
-            # AD Recovery Keys
+			
+			# ----------------------------
+            # AD Recovery Keys (safe)
             # ----------------------------
             $ADKeys = Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName
-            $ADKeyCount = if ($ADKeys) { $ADKeys.Count } else { 0 }
+            
+            $NormalizedADPasswords = @()
+            if ($ADKeys -and $ADKeys.RecoveryPassword) {
+                $NormalizedADPasswords = $ADKeys.RecoveryPassword | ForEach-Object { $_.Trim() }
+            }
+            
+            $ADKeyCount = $NormalizedADPasswords.Count
+
+            # Always produce a safe, normalized array
+            $NormalizedADPasswords = @()
+            
+            if ($ADKeys -and $ADKeys.RecoveryPassword) {
+                $NormalizedADPasswords = $ADKeys.RecoveryPassword |
+                    ForEach-Object { $_.Trim() }
+            }
+            
+            $ADKeyCount = $NormalizedADPasswords.Count
+
     
             # ----------------------------
             # TPM Status
@@ -127,6 +146,7 @@ function Invoke-BitLockerParallel {
             # ----------------------------
             # Optional Auto-Enable
             # ----------------------------
+			Write-Log "DEBUG: AutoEnable=$AutoEnable  CanEnable=$CanEnable" -ComputerName $ComputerName
             if ($AutoEnable -and $CanEnable) {
                 if ($PSCmdlet.ShouldProcess($ComputerName, "Enable BitLocker")) {
                     Enable-BitLockerRemote -ComputerName $ComputerName | Out-Null
@@ -158,33 +178,53 @@ function Invoke-BitLockerParallel {
             # ----------------------------
             $BackupResult = $null
             
+            # Extract local key safely
             $localKey = $NewestProtector.RecoveryPassword
             
-            # Normalize both sides
-            $NormalizedLocalPassword = $localKey.Trim()
+            if (-not $localKey) {
+                Write-Log "ERROR: Local RecoveryPassword is NULL — cannot compare or back up" -Level "ERROR" -ComputerName $ComputerName
             
-            $NormalizedADPasswords = $ADKeys.RecoveryPassword |
-                ForEach-Object { $_.Trim() }
-            
-            # Already escrowed?
-            if ($NormalizedADPasswords -contains $NormalizedLocalPassword) {
-            
-                Write-Log "Local key already escrowed to AD — no backup needed" -ComputerName $ComputerName
-            
+                # Always produce a BackupResult object
                 $BackupResult = [PSCustomObject]@{
                     RecoveryKeyID    = $NewestProtector.KeyProtectorId.ToString().Trim('{}')
-                    ADVerified       = $true
-                    RecoveryPassword = $localKey
+                    ADVerified       = $false
+                    RecoveryPassword = $null
                 }
             }
             else {
-                Write-Log "Local key missing from AD — performing backup" -Level "WARN" -ComputerName $ComputerName
+                # Normalize local password
+                $NormalizedLocalPassword = $localKey.Trim()
             
-                $BackupResult = Backup-AndVerifyBitLockerKey `
-                                    -ComputerName $ComputerName `
-                                    -KeyProtectorId $NewestProtector.KeyProtectorId `
-                                    -RecoveryPassword $localKey `
-                                    -IncludeRecoveryKey:$IncludeKey
+                # Already escrowed?
+                if ($NormalizedADPasswords -contains $NormalizedLocalPassword) {
+            
+                    Write-Log "Local key already escrowed to AD — no backup needed" -ComputerName $ComputerName
+            
+                    $BackupResult = [PSCustomObject]@{
+                        RecoveryKeyID    = $NewestProtector.KeyProtectorId.ToString().Trim('{}')
+                        ADVerified       = $true
+                        RecoveryPassword = $localKey
+                    }
+                }
+                else {
+                    Write-Log "Local key missing from AD — performing backup" -Level "WARN" -ComputerName $ComputerName
+            
+                    $BackupResult = Backup-AndVerifyBitLockerKey `
+                                        -ComputerName $ComputerName `
+                                        -KeyProtectorId $NewestProtector.KeyProtectorId `
+                                        -RecoveryPassword $localKey `
+                                        -IncludeRecoveryKey:$IncludeKey
+
+                    # After backup, refresh AD keys and counts
+                    $ADKeys = Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName
+                    
+                    $NormalizedADPasswords = @()
+                    if ($ADKeys -and $ADKeys.RecoveryPassword) {
+                        $NormalizedADPasswords = $ADKeys.RecoveryPassword | ForEach-Object { $_.Trim() }
+                    }
+                    
+                    $ADKeyCount = $NormalizedADPasswords.Count
+                }
             }
 
 
