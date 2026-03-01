@@ -283,7 +283,7 @@ function Invoke-BitLockerParallel {
             $MachineKeyCount = if ($keyInfo) { $keyInfo.MachineKeyCount } else { 0 }
             
             # Only enable BitLocker if MachineKeyCount is 0
-            $CanEnable = ($MachineKeyCount -eq 0)
+			$CanEnable = ($status.Protected -eq "Off" -and $MachineKeyCount -eq 0)
             
             # ----------------------------
             # Optional Auto-Enable
@@ -375,14 +375,18 @@ function Invoke-BitLockerParallel {
                 ADKeyCount             = $ADKeyCount
                 ADVerified             = $backup.ADVerified
                 ADRecoveryKeyID        = $status.ADRecoveryKeyID
-                ADRecoveryKeyPassword  = if ($IncludeKey) {$status.ADRecoveryKeyPassword}
-				LocalKeySource         = $keyinfo.LocalKeySource
-                RecoveryKeyID          = $status.RecoveryKeyID.ToString().Trim('{}')
-                RecoveryPassword       = if ($IncludeKey) {$status.RecoveryPassword}
+                ADRecoveryKeyPassword  = if ($IncludeKey) { $status.ADRecoveryKeyPassword }
+                LocalKeySource         = $keyInfo.LocalKeySource
+                RecoveryKeyID          = if ($status.RecoveryKeyID) { 
+                                             [string]$status.RecoveryKeyID.Trim('{}') 
+                                         } else { 
+                                             $null 
+                                         }
+                RecoveryPassword       = if ($IncludeKey) { $status.RecoveryPassword }
                 TPMPresent             = $status.TpmPresent
                 TPMReady               = $status.TpmReady
                 CanEnableBitLocker     = $CanEnable
-				ActivatedBitlocker     = $status.ActivatedBitlocker
+                ActivatedBitlocker     = $status.ActivatedBitlocker
             }
         }
         catch {
@@ -959,6 +963,9 @@ function Backup-BitLocker {
         [string[]]$ADPasswords             # AD escrowed keys as strings, can be null
     )
 
+    $AttemptBackup = $false
+    $ADVerified    = $false
+	
     # Ensure local key and RecoveryKeyID are strings
     $LocalKey      = $Status.RecoveryPassword
     $RecoveryKeyID = if ($Status.RecoveryKeyID) { [string]$Status.RecoveryKeyID.Trim('{}') } else { $null }
