@@ -1,181 +1,8 @@
-<#
-.SYNOPSIS
-Generates a BitLocker status and recovery key compliance report for Active Directory computers
-using parallel processing.
 
-.DESCRIPTION
-Invoke-BitlockerTool queries domain-joined computers and collects:
-
-• WinRM connectivity status
-• BitLocker protection state
-• Encryption percentage
-• TPM presence and readiness
-• Active Directory recovery key information
-
-Optional remediation capabilities include:
-
-• Automatically enabling BitLocker on eligible devices
-• Backing up missing recovery keys to Active Directory
-• Removing duplicate recovery password protectors
-• Performing AD-only audits (no endpoint contact required)
-
-Results are returned to the pipeline and exported to CSV.
-
-This cmdlet supports -WhatIf and -Confirm for safe remediation execution.
-Parallel execution is optimized for PowerShell 7+ using ForEach-Object -Parallel.
-
-.PARAMETER Filter
-Active Directory filter string in standard PowerShell AD syntax.
-
-This parameter is passed directly to Get-ADComputer -Filter.
-
-Examples:
-    "Name -like 'LT-*'"
-    "Enabled -eq 'True'"
-    "OperatingSystem -notlike '*Server*'"
-    "Name -like 'LAB-*' -and Enabled -eq 'True'"
-
-Default: "*"
-
-NOTE:
-This is NOT LDAP filter syntax.
-
-.PARAMETER ComputerList
-Path to a text file containing one computer name per line.
-Lines beginning with # are ignored.
-
-Useful for queue-based processing or retry batches.
-
-.PARAMETER OutputPath
-Path to the CSV report file.
-
-Default: .\BitLocker_Report.csv
-
-.PARAMETER Mode
-Controls CSV export behavior.
-
-Append     – Adds to existing file  
-Overwrite  – Replaces existing file
-
-Default: Append
-
-.PARAMETER ThrottleLimit
-Maximum number of parallel threads when running under PowerShell 7+.
-
-Default: 20
-
-.PARAMETER IncludeRecoveryKey
-Includes the most recent BitLocker recovery password stored in AD
-in the exported report.
-
-WARNING:
-Recovery passwords are exported in plaintext.
-
-.PARAMETER ADOnly
-Performs an Active Directory–only audit of recovery key presence.
-Skips WinRM connectivity and endpoint inspection.
-
-.PARAMETER AutoEnableBitLocker
-Automatically enables BitLocker on eligible machines where:
-
-• BitLocker is not already enabled
-• TPM is present
-• TPM is ready
-• No existing Machine RecoveryPassword protector exists
-
-Supports -WhatIf and -Confirm.
-
-.PARAMETER CleanupProtectors
-Removes older duplicate recovery password protectors,
-keeping only the newest protector.
-
-.PARAMETER OnlineOnly
-Reports devices with status online for export to csv.
-
-Supports -WhatIf and -Confirm.
-
-.EXAMPLE
-Invoke-BitlockerTool
-
-Runs against all domain computers (Filter defaults to "*")
-and exports a BitLocker compliance report.
-
-.EXAMPLE
-Invoke-BitlockerTool -Filter "Name -like 'LT-*'"
-
-Reports on all laptop devices.
-
-.EXAMPLE
-Invoke-BitlockerTool -ComputerList .\queue.txt
-
-Processes only machines listed in queue.txt
-and attempts to escrow missing recovery keys.
-
-.EXAMPLE
-Invoke-BitlockerTool -ADOnly -IncludeRecoveryKey
-
-Performs an AD-only recovery key audit without contacting endpoints.
-
-.EXAMPLE
-Invoke-BitlockerTool -Filter "Name -like 'LT-*'" `
-    -AutoEnableBitLocker `
-    -CleanupProtectors `
-    -IncludeRecoveryKey `
-    -Mode Overwrite `
-    -Confirm:$false
-
-Full remediation mode:
-• Enables BitLocker where eligible
-• Removes duplicate protectors
-• Includes recovery passwords
-• Overwrites existing report
-
-.OUTPUTS
-PSCustomObject with properties:
-
-Timestamp           
-Computer            
-Online              
-WinRM               
-Reported            
-Volume              
-Protected           
-Percent             
-MachineKeyCount     
-ADKeyCount          
-ADVerified          
-ADRecoveryKeyID     
-ADRecoveryKeyPasswor
-LocalKeySource      
-RecoveryKeyID       
-RecoveryPassword    
-TPMPresent          
-TPMReady            
-CanEnableBitLocker  
-ActivatedBitlocker  
-
-
-.NOTES
-Author: Bill Galway
-Module: BitLockerTools
-Version: 1.0
-
-Requires:
-• ActiveDirectory module
-• BitLocker cmdlets
-• WinRM enabled on target systems
-• PowerShell 7+ Required
-
-Supports:
-• -WhatIf
-• -Confirm
-• Parallel execution with ForEach-Object -Parallel
-• Safe CSV export
-#>
 function Invoke-BitlockerTool {
-
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High")]
-    param(
+	[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='High')]
+    
+	param(
         [Parameter(ParameterSetName="AD")]
         [string]$Filter = "*",
         [Parameter(ParameterSetName="File")]
@@ -216,13 +43,16 @@ function Invoke-BitlockerTool {
     # Parallel Processing
     # --------------------------------------------------
 	
-	$WhatIfMode = $WhatIfPreference
+	$ModulePath = Join-Path (Get-Location) 'BitlockerRecoveryTools.psm1'
 	
     $Results = $Computers | ForEach-Object -Parallel {
-
         Import-Module ActiveDirectory -ErrorAction SilentlyContinue
-        Import-Module C:\bat\BitlockerRecoveryTools\BitlockerRecoveryTools -Force
-        $WhatIfMode = $using:WhatIfMode
+
+        $ModulePathLocal = $using:ModulePath
+        if (-not (Get-Module -Name BitlockerRecoveryTools -ListAvailable)) {
+            Import-Module $ModulePathLocal -Force
+        }
+		
         $ComputerName = $_
         $IncludeKey   = $using:IncludeRecoveryKey
         $ADOnlyFlag   = $using:ADOnly
@@ -234,6 +64,9 @@ function Invoke-BitlockerTool {
             # ----------------------------
             # AD Only Mode
             # ----------------------------
+			
+			$EnableBDEResult = $null
+			
             if ($ADOnlyFlag) {
                 $ADKeys = Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName
 				$ADKeyCount = if ($ADKeys) { $ADKeys.Count } else { 0 }	   
@@ -257,6 +90,7 @@ function Invoke-BitlockerTool {
                     TPMPresent             = $false
                     TPMReady               = $false
                     CanEnableBitLocker     = $false
+					Error                  = $null
                 }
             }
         
@@ -300,16 +134,13 @@ function Invoke-BitlockerTool {
             # ----------------------------
             if ($AutoEnable -and $CanEnable) {
             
-                if (-not $WhatIfMode) {
+                if ($PSCmdlet.ShouldProcess($ComputerName, "Enable BitLocker")) {
             
                     $EnableBDEResult = Enable-BitLockerRemote -ComputerName $ComputerName
             
                     if ($EnableBDEResult -and $EnableBDEResult.ProtectionStatus -ne "Off") {
                         Start-Sleep -Seconds 5
                     }
-                }
-                else {
-                    Write-Log "WhatIf: Would enable BitLocker" -ComputerName $ComputerName
                 }
             }
             else {
@@ -322,18 +153,15 @@ function Invoke-BitlockerTool {
             # ----------------------------
             if ($CleanupFlag) {
             
-                if (-not $WhatIfMode) {
+                if ($PSCmdlet.ShouldProcess($ComputerName, "Remove extra BitLocker protectors")) {
                     Remove-ExtraBitLockerProtectors -ComputerName $ComputerName
-                }
-                else {
-                    Write-Log "WhatIf: Would remove extra BitLocker protectors" -ComputerName $ComputerName
                 }
             }
         
             #------------------------------------------------------
             # Backup local recovery key if not escrowed with AD
             #------------------------------------------------------
-			$backup = Backup-BitLocker -Status $status -ADPasswords $ADPasswords
+			$backup = Backup-BitLocker -Status $status -ADPasswords $ADPasswords -PSCmdlet $PSCmdlet
 			
 			
 			#--------------------------
@@ -341,7 +169,7 @@ function Invoke-BitlockerTool {
 			#--------------------------
 			if ($EnableBDEResult) {
 				Write-Log "$EnableBDEResult"
-                Write-Log "Local Recovery Keys Backup Attempted..Confirming" Local Recovery Keys Backup Attempted..Confirming
+                Write-Log "Local Recovery Keys Backup Attempted..Confirming" Local Recovery Keys Backup Attempted..Confirming -ComputerName $ComputerName
 				$status                       = Get-BitLockerStatus -ComputerName $ComputerName
 				if (-not $status) { throw "Failed to retrieve BitLocker snapshot" }
 				$ADKeys                       = @(Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName)
@@ -409,8 +237,8 @@ function Invoke-BitlockerTool {
             [PSCustomObject]@{
                 Timestamp              = Get-Date
                 Computer               = $ComputerName
-                Online                 = $conn.Online
-				WinRM                  = $conn.WinRM
+				Online                 = if ($conn) { $conn.Online } else { $false }
+				WinRM                  = if ($conn) { $conn.WinRM } else { $false }
                 Reported               = $false
                 Volume                 = $null
                 Protected              = $null
@@ -427,6 +255,7 @@ function Invoke-BitlockerTool {
                 TPMReady               = $false
                 CanEnableBitLocker     = $false
 				ActivatedBitlocker     = $false
+				Error                  = $null
             }
         }
     
@@ -494,8 +323,6 @@ function Invoke-BitlockerTool {
     # --------------------------------------------------
     # Export CSV - Apply -OnlineOnly filtering ONLY here
     # --------------------------------------------------
-    Write-Log "Are we Online Only: $OnlineOnly"
-    
     $ExportResults = if ($OnlineOnly) {
         $Results | Where-Object { $_.Online -eq $true }
     }
@@ -599,7 +426,7 @@ $BitLockerTemplate = [PSCustomObject]@{
     ADKeyCount             = 0
     ADVerified             = $null
 	ADRecoveryKeyID        = $null
-	ADRecoverykeyPassword  = $null
+	ADRecoveryKeyPassword  = $null
     LocalKeySource         = $null
     RecoveryKeyID          = $null
     RecoveryPassword       = $null
@@ -756,7 +583,9 @@ function Get-ADBitLockerRecoveryKeys {
 # Enable Bitlocker
 # ----------------------------
 function Enable-BitLockerRemote {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
+        [Parameter(Mandatory)]
         [string]$ComputerName
     )
 
@@ -765,44 +594,49 @@ function Enable-BitLockerRemote {
     try {
         $result = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
             param($PSCmdlet)
-
             $mount = "C:"
 
             $vol = Get-BitLockerVolume -MountPoint $mount -ErrorAction Stop | Select-Object -First 1
-            if ($null -eq $vol) { throw "Volume $mount not found" }
+            if (-not $vol) { throw "Volume $mount not found" }
 
             # Resume if suspended
             if ($vol.VolumeStatus -eq "Suspended") {
-                if ($PSCmdlet -and $PSCmdlet.ShouldProcess("$env:COMPUTERNAME", "Resume BitLocker on $mount")) {
+                if ($PSCmdlet.ShouldProcess($ComputerName, "Resume suspended BitLocker on $mount")) {
                     Resume-BitLocker -MountPoint $mount -ErrorAction Stop
                     Start-Sleep 3
-                } else {
+                    Write-Host "Resumed BitLocker on $mount"
+                }
+                else {
                     Write-Host "WhatIf: Would resume BitLocker on $mount"
                 }
             }
 
             # Enable BitLocker if protection is off
             if ($vol.ProtectionStatus -eq "Off") {
-                if (-not $WhatIfMode) {
+                if ($PSCmdlet.ShouldProcess($ComputerName, "Enable BitLocker on $mount")) {
                     Enable-BitLocker -MountPoint $mount `
                                      -EncryptionMethod XtsAes256 `
                                      -RecoveryPasswordProtector `
                                      -Confirm:$false -ErrorAction Stop | Out-Null
-                } else {
-                    Write-Log "WhatIf: Would remove BitLocker key $NewestProtector.KeyProtectorId" -ComputerName $ComputerName
+                    Write-Host "BitLocker enabled on $mount"
+                }
+                else {
+                    Write-Host "WhatIf: Would enable BitLocker on $mount"
                 }
             }
+
         } -ArgumentList $PSCmdlet -ErrorAction Stop | Select-Object -First 1
+
         $status = [PSCustomObject]@{
-			ProtectionStatus      = "Off (Reboot Pending)"
-            ActivatedBitlocker    = "$true"
-            }
+            ProtectionStatus   = "Off (Reboot Pending)"
+            ActivatedBitlocker = $true
+        }
+
         Write-Log "BitLocker operation completed on $ComputerName" -ComputerName $ComputerName
         return $status
     }
     catch {
-        $errorMsg = $_.Exception.Message
-        Write-Log "Failed to enable BitLocker on $ComputerName : $errorMsg" -Level ERROR -ComputerName $ComputerName
+        Write-Log "Failed to enable BitLocker on $ComputerName : $($_.Exception.Message)" -Level ERROR -ComputerName $ComputerName
         return $null
     }
 }
@@ -812,9 +646,10 @@ function Enable-BitLockerRemote {
 # Remove extra recovery protectors (keep newest)
 # ----------------------------
 function Remove-ExtraBitLockerProtectors {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
-        [string]$ComputerName,
-        [bool]$WhatIfMode = $false
+        [Parameter(Mandatory)]
+        [string]$ComputerName
     )
 
     try {
@@ -839,9 +674,8 @@ function Remove-ExtraBitLockerProtectors {
         # Prepare list of IDs to remove
         $toRemove = $passwords | Where-Object { $_.KeyProtectorId -ne $keep.KeyProtectorId } | Select-Object -ExpandProperty KeyProtectorId
 
-        # Remove each protector one by one
         foreach ($id in $toRemove) {
-            if (-not $WhatIfMode) {
+            if ($PSCmdlet.ShouldProcess($ComputerName, "Remove BitLocker key protector $id")) {
                 Invoke-Command -ComputerName $ComputerName -ScriptBlock {
                     param($RemoveID)
                     Remove-BitLockerKeyProtector -MountPoint "C:" -KeyProtectorId $RemoveID -ErrorAction Stop
@@ -977,17 +811,18 @@ function Get-CVolumeRecoveryKeyCount {
 # ----Backup Bitlocker--------
 # ----------------------------
 function Backup-BitLocker {
-    [CmdletBinding(SupportsShouldProcess)]
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Status,           # BitLocker snapshot object
-        [string[]]$ADPasswords             # AD escrowed keys as strings, can be null
+        [string[]]$ADPasswords,            # AD escrowed keys as strings, can be null
+        [Parameter(Mandatory=$false)]
+        [System.Management.Automation.PSCmdlet]$PSCmdlet
     )
 
     $AttemptBackup = $false
     $ADVerified    = $false
 	
-    # Ensure local key and RecoveryKeyID are strings
     $LocalKey      = $Status.RecoveryPassword
     $RecoveryKeyID = if ($Status.RecoveryKeyID) { [string]$Status.RecoveryKeyID.Trim('{}') } else { $null }
 
@@ -995,24 +830,22 @@ function Backup-BitLocker {
         Write-Log "No valid RecoveryPassword protector found — skipping backup" -Level "WARN" -ComputerName $Status.Computer
         return [PSCustomObject]@{
             ADVerified       = $false
+            AttemptBackup    = $false
             RecoveryKeyID    = $RecoveryKeyID
-            RecoveryPassword = if ($LocalKey) { $LocalKey } else { $null }
+            RecoveryPassword = $null
         }
     }
 
-    # Ensure $ADPasswords is never null
     if (-not $ADPasswords) { $ADPasswords = @() }
 
-    # Compare with AD keys (always a string)
     $IsEscrowed = if ($ADPasswords.Count -gt 0) { $ADPasswords -contains $LocalKey } else { $false }
 
     if (-not $IsEscrowed) {
-		$AttemptBackup = $true
+        $AttemptBackup = $true
         Write-Log "Backing up BitLocker recovery key ID: $RecoveryKeyID" -ComputerName $Status.Computer
-		
 
         try {
-            if ($PSCmdlet -and $PSCmdlet.ShouldProcess("$($Status.Computer)", "Backup BitLocker recovery key $RecoveryKeyID")) {
+            if ($PSCmdlet -and $PSCmdlet.ShouldProcess($Status.Computer, "Backup BitLocker recovery key $RecoveryKeyID")) {
                 Invoke-Command -ComputerName $Status.Computer -ScriptBlock {
                     param($MP, $KPID)
                     Backup-BitLockerKeyProtector -MountPoint $MP -KeyProtectorId $KPID -ErrorAction Stop | Out-Null
@@ -1020,6 +853,7 @@ function Backup-BitLocker {
 
                 Write-Log "Backup completed, allowing time for AD replication..." -ComputerName $Status.Computer
                 Start-Sleep -Seconds 15
+                $ADVerified = $true
             }
             else {
                 Write-Log "Skipping backup due to -WhatIf or confirmation prompt" -ComputerName $Status.Computer
@@ -1028,17 +862,15 @@ function Backup-BitLocker {
         catch {
             Write-Log "ERROR: Failed to back up recovery key: $($_.Exception.Message)" -Level "ERROR" -ComputerName $Status.Computer
         }
-	$ADVerified = $true
     }
     else {
         Write-Log "Recovery key escrowed — no backup needed" -ComputerName $Status.Computer
         $ADVerified = $true
     }
 
-    # Return a clean PSCustomObject with string values
     return [PSCustomObject]@{
-        ADVerified            = $ADVerified
-		AttemptBackup         = $AttemptBackup
+        ADVerified    = $ADVerified
+        AttemptBackup = $AttemptBackup
     }
 }
 
@@ -1076,7 +908,7 @@ function Export-ResultsSafe {
             Protected              = $_.Protected
             Percent                = $_.Percent
             ADRecoveryKeyID        = & $JoinArray $_.ADRecoveryKeyID
-            ADRecoverykeyPassword  = & $JoinArray $_.ADRecoverykeyPassword
+            ADRecoveryKeyPassword  = & $JoinArray $_.ADRecoveryKeyPassword
 			LocalKeySource         = & $JoinArray $_.LocalKeySource
             RecoveryKey            = & $JoinArray $_.RecoveryKeyID
             RecoveryPassword       = & $JoinArray $_.RecoveryPassword
