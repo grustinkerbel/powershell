@@ -174,6 +174,7 @@ Supports:
 • Safe CSV export
 #>
 function Invoke-BitlockerTool {
+	[CmdletBinding(SupportsShouldProcess=$true)]
     param(
         [Parameter(ParameterSetName="AD")]
         [string]$Filter = "*",
@@ -243,7 +244,7 @@ function Invoke-BitlockerTool {
                     Timestamp              = Get-Date
                     Computer               = $ComputerName
                     Online                 = $false
-					WMIStatus              = $false
+					WinRM                  = $false
                     Reported               = $false
                     Volume                 = "C:"
                     Protected              = $false
@@ -292,27 +293,25 @@ function Invoke-BitlockerTool {
             $MachineKeyCount = if ($keyInfo) { $keyInfo.MachineKeyCount } else { 0 }
 
 			$CanEnable = ($status.Protected.ToString() -eq "Off" -and $MachineKeyCount -eq 0)
-    
-           
+
             # ----------------------------
             # Optional Auto-Enable
             # ----------------------------
+            $EnableBDEResult = $null
+            
             if ($AutoEnable -and $CanEnable) {
-           
-               # Compare WhatIfMode as a STRING
-                if (-not $IsWhatIf) {
-           
-                    # Actually enable BitLocker remotely
+            
+                if ($IsWhatIf) {
+                    Write-Log "WhatIf: Would enable BitLocker on $ComputerName" -ComputerName $ComputerName -Level "INFO"
+                }
+                else {
                     $EnableBDEResult = Enable-BitLockerRemote -ComputerName $ComputerName
-           
+            
                     if ($EnableBDEResult -and $EnableBDEResult.ProtectionStatus -ne "Off") {
-                       Start-Sleep -Seconds 5
+                        Start-Sleep -Seconds 5
                     }
-               }
-               else {
-                   Write-Log "WhatIf: Would enable BitLocker on $ComputerName" -ComputerName $ComputerName -Level "INFO"
-               }
-			}
+                }
+            }
 
 
             # ----------------------------
@@ -373,13 +372,13 @@ function Invoke-BitlockerTool {
             [PSCustomObject]@{
                 Timestamp              = Get-Date
                 Computer               = $ComputerName
-                Online                 = $conn.Online
-				WinRM                  = $conn.WinRM
+				Online                 = if ($conn) { $conn.Online } else { $false }
+                WinRM                  = if ($conn) { $conn.WinRM } else { $false }
                 Reported               = $true
                 Volume                 = "C:"
                 Protected              = $status.Protected
                 Percent                = $status.Percent
-                MachineKeyCount        = $status.MachineKeyCount
+                MachineKeyCount        = $MachineKeyCount
                 ADKeyCount             = $ADKeyCount
                 ADVerified             = $backup.ADVerified
                 ADRecoveryKeyID        = $status.ADRecoveryKeyID
@@ -406,8 +405,8 @@ function Invoke-BitlockerTool {
             [PSCustomObject]@{
                 Timestamp              = Get-Date
                 Computer               = $ComputerName
-                Online                 = $conn.Online
-				WinRM                  = $conn.WinRM
+				Online                 = if ($conn) { $conn.Online } else { $false }
+                WinRM                  = if ($conn) { $conn.WinRM } else { $false }
                 Reported               = $false
                 Volume                 = $null
                 Protected              = $null
@@ -451,7 +450,7 @@ function Invoke-BitlockerTool {
         Write-Host "Added $($newUnreachable.Count) new unreachable computers." -ForegroundColor Yellow
     }
     else {
-        Write-Log "No new unreachable computers to add." -Computername $ComputerName
+        Write-Log "No new unreachable computers to add."
     }
 
     # --------------------------------------------------
@@ -595,7 +594,7 @@ $BitLockerTemplate = [PSCustomObject]@{
     ADKeyCount             = 0
     ADVerified             = $null
 	ADRecoveryKeyID        = $null
-	ADRecoverykeyPassword  = $null
+	ADRecoveryKeyPassword  = $null
     LocalKeySource         = $null
     RecoveryKeyID          = $null
     RecoveryPassword       = $null
@@ -1054,7 +1053,7 @@ function Export-ResultsSafe {
             Protected              = $_.Protected
             Percent                = $_.Percent
             ADRecoveryKeyID        = & $JoinArray $_.ADRecoveryKeyID
-            ADRecoverykeyPassword  = & $JoinArray $_.ADRecoverykeyPassword
+            ADRecoveryKeyPassword  = & $JoinArray $_.ADRecoveryKeyPassword
 			LocalKeySource         = & $JoinArray $_.LocalKeySource
             RecoveryKey            = & $JoinArray $_.RecoveryKeyID
             RecoveryPassword       = & $JoinArray $_.RecoveryPassword
