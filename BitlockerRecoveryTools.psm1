@@ -174,8 +174,6 @@ Supports:
 • Safe CSV export
 #>
 function Invoke-BitlockerTool {
-
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High")]
     param(
         [Parameter(ParameterSetName="AD")]
         [string]$Filter = "*",
@@ -323,7 +321,7 @@ function Invoke-BitlockerTool {
             if ($CleanupFlag) {
             
                 if (-not $IsWhatIf) {
-                    Remove-ExtraBitLockerProtectors -ComputerName $ComputerName
+                    Remove-ExtraBitLockerProtectors -ComputerName $ComputerName -IsWhatIf $IsWhatIf
                 }
                 else {
                     Write-Log "WhatIf: Would remove extra BitLocker protectors" -ComputerName $ComputerName
@@ -341,7 +339,7 @@ function Invoke-BitlockerTool {
 			#--------------------------
 			if ($EnableBDEResult) {
                 Write-Log "Local Recovery Keys Backup Attempted..Confirming" -ComputerName $ComputerName
-				$status                       = Get-BitLockerStatus Local Recovery Keys
+				$status                       = Get-BitLockerStatus -ComputerName $ComputerName
 				if (-not $status) { throw "Failed to retrieve BitLocker snapshot" }
 				$ADKeys                       = @(Get-ADBitLockerRecoveryKeys -ComputerName $ComputerName)
 				$status.Protected             = $EnableBDEResult.ProtectionStatus
@@ -790,7 +788,8 @@ function Enable-BitLockerRemote {
 # ----------------------------
 function Remove-ExtraBitLockerProtectors {
     param(
-        [string]$ComputerName
+        [string]$ComputerName,
+		[bool]$IsWhatIf
     )
 
     try {
@@ -799,6 +798,11 @@ function Remove-ExtraBitLockerProtectors {
         # Get volume and protectors remotely
         $protectors = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
             Get-BitLockerVolume -MountPoint "C:" | Select-Object -First 1
+        }
+		
+        if (-not $protectors) {
+            Write-Log "ERROR: Unable to retrieve BitLocker volume on $ComputerName" -Level ERROR -ComputerName $ComputerName
+            return
         }
 
         $passwords = @($protectors.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" })
@@ -817,7 +821,7 @@ function Remove-ExtraBitLockerProtectors {
 
         # Remove each protector one by one
         foreach ($id in $toRemove) {
-            if ($using:WhatIfMode -eq "False") {
+            if ((-not $IsWhatIf)) {
                 Invoke-Command -ComputerName $ComputerName -ScriptBlock {
                     param($RemoveID)
                     Remove-BitLockerKeyProtector -MountPoint "C:" -KeyProtectorId $RemoveID -ErrorAction Stop
