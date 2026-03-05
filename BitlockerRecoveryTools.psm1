@@ -229,8 +229,7 @@ function Invoke-BitlockerTool {
 
 
     $Results = $Computers | ForEach-Object -Parallel {
-
-        Import-Module ActiveDirectory -ErrorAction SilentlyContinue
+	
         Import-Module C:\bat\BitlockerRecoveryTools\BitlockerRecoveryTools -Force
        		
         $ComputerName    = $_
@@ -1087,6 +1086,7 @@ function Export-ResultsSafe {
     $CleanedResults | Export-Csv @exportParams
 }
 
+Import-Module ActiveDirectory -ErrorAction SilentlyContinue
 
 if (-not $script:LogMutex) {
     $script:LogMutex = New-Object System.Threading.Mutex($false, "Global\ARDScriptsLogMutex")
