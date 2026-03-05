@@ -94,7 +94,7 @@ Supports -WhatIf and -Confirm.
 Removes older duplicate recovery password protectors,
 keeping only the newest protector.
 
-.PARAMETER OnlineOnly
+.PARAMETER ContactedOnly
 Includes only devices that are currently online in the CSV export.
 
 .PARAMETER Confirm
@@ -193,7 +193,7 @@ function Invoke-BitlockerTool {
         [ValidateSet("Append","Overwrite")]
         [string]$Mode = "Append",
         [int]$ThrottleLimit = 20,
-		[switch]$OnlineOnly,
+		[switch]$ContactedOnly,
         [switch]$IncludeRecoveryKey,
         [switch]$ADOnly,
         [switch]$AutoEnableBitLocker,
@@ -233,13 +233,13 @@ function Invoke-BitlockerTool {
         Import-Module ActiveDirectory -ErrorAction SilentlyContinue
         Import-Module C:\bat\BitlockerRecoveryTools\BitlockerRecoveryTools -Force
        		
-        $ComputerName = $_
-        $IncludeKey   = $using:IncludeRecoveryKey
-        $ADOnlyFlag   = $using:ADOnly
-        $AutoEnable   = $using:AutoEnableBitLocker
-        $CleanupFlag  = $using:CleanupProtectors
-		$OnlineOnly   = $using:OnlineOnly
-		$IsWhatIf     = $using:WhatIfFlag
+        $ComputerName    = $_
+        $IncludeKey      = $using:IncludeRecoveryKey
+        $ADOnlyFlag      = $using:ADOnly
+        $AutoEnable      = $using:AutoEnableBitLocker
+        $CleanupFlag     = $using:CleanupProtectors
+		$ContactedOnly   = $using:ContactedOnly
+		$IsWhatIf        = $using:WhatIfFlag
        
         try {
             # ----------------------------
@@ -300,6 +300,13 @@ function Invoke-BitlockerTool {
             # Determine BitLocker Enable Eligibility
             $keyInfo = Get-CVolumeRecoveryKeyCount -ComputerName $ComputerName
             $MachineKeyCount = if ($keyInfo) { $keyInfo.MachineKeyCount } else { 0 }
+
+            $CanEnable = (
+                $status.Protected.ToString() -eq "Off" -and
+                $status.TpmPresent -and
+                $status.TpmReady -and
+                $MachineKeyCount -eq 0
+			)
 
 			$CanEnable = ($status.Protected.ToString() -eq "Off" -and $MachineKeyCount -eq 0)
 
@@ -497,10 +504,10 @@ function Invoke-BitlockerTool {
     }
     
     # --------------------------------------------------
-    # Export CSV - Apply -OnlineOnly filtering ONLY here
+    # Export CSV - Apply -ContactedOnly filtering ONLY here
     # --------------------------------------------------
     
-    $ExportResults = if ($OnlineOnly) {
+    $ExportResults = if ($ContactedOnly) {
         $Results | Where-Object { $_.Online -eq $true }
     }
     else {
@@ -633,15 +640,6 @@ function Get-BitLockerStatus {
 
     # Start with fresh template
     $result = New-BitLockerResult -ComputerName $ComputerName
-
-    # First, check if computer is online
-    if (-not (Test-Connection -ComputerName $ComputerName -Count 1 -Quiet)) {
-        $result.Online = $false
-        $result.Error  = "Computer is offline"
-        return $result
-    }
-
-    $result.Online = $true
 
     try {
         $snapshot = Invoke-Command -ComputerName $ComputerName -ErrorAction Stop -ScriptBlock {
