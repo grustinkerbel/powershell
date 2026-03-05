@@ -21,8 +21,13 @@ Optional remediation capabilities include:
 
 Results are returned to the pipeline and exported to CSV.
 
-This cmdlet supports -WhatIf and -Confirm for safe remediation execution.
+This cmdlet uses CmdletBinding with SupportsShouldProcess and supports
+-WhatIf and -Confirm for safe remediation execution.
+
 Parallel execution is optimized for PowerShell 7+ using ForEach-Object -Parallel.
+
+.INPUTS
+None. Computer names are retrieved from Active Directory or a provided list.
 
 .PARAMETER Filter
 Active Directory filter string in standard PowerShell AD syntax.
@@ -30,12 +35,12 @@ Active Directory filter string in standard PowerShell AD syntax.
 This parameter is passed directly to Get-ADComputer -Filter.
 
 Examples:
-    "Name -like 'LT-*'"
-    "Enabled -eq 'True'"
-    "OperatingSystem -notlike '*Server*'"
-    "Name -like 'LAB-*' -and Enabled -eq 'True'"
+"Name -like 'LT-*'"
+"Enabled -eq 'True'"
+"OperatingSystem -notlike '*Server*'"
+"Name -like 'LAB-*' -and Enabled -eq 'True'"
 
-Default: "*"
+Default: *
 
 NOTE:
 This is NOT LDAP filter syntax.
@@ -54,7 +59,7 @@ Default: .\BitLocker_Report.csv
 .PARAMETER Mode
 Controls CSV export behavior.
 
-Append     – Adds to existing file  
+Append     – Adds to existing file
 Overwrite  – Replaces existing file
 
 Default: Append
@@ -90,14 +95,16 @@ Removes older duplicate recovery password protectors,
 keeping only the newest protector.
 
 .PARAMETER OnlineOnly
-Reports devices with status online for export to csv.
+Includes only devices that are currently online in the CSV export.
 
-Supports -WhatIf and -Confirm.
+.PARAMETER Confirm
+Prompts for confirmation before performing remediation actions such as
+enabling BitLocker or modifying recovery key protectors.
 
 .EXAMPLE
 Invoke-BitlockerTool
 
-Runs against all domain computers (Filter defaults to "*")
+Runs against all domain computers (Filter defaults to *)
 and exports a BitLocker compliance report.
 
 .EXAMPLE
@@ -117,12 +124,10 @@ Invoke-BitlockerTool -ADOnly -IncludeRecoveryKey
 Performs an AD-only recovery key audit without contacting endpoints.
 
 .EXAMPLE
-Invoke-BitlockerTool -Filter "Name -like 'LT-*'" `
-    -AutoEnableBitLocker `
-    -CleanupProtectors `
-    -IncludeRecoveryKey `
-    -Mode Overwrite `
-    -Confirm:$false
+Invoke-BitlockerTool -Filter "Name -like 'LT-*'" `    -AutoEnableBitLocker`
+-CleanupProtectors `    -IncludeRecoveryKey`
+-Mode Overwrite `
+-Confirm:$false
 
 Full remediation mode:
 • Enables BitLocker where eligible
@@ -131,30 +136,30 @@ Full remediation mode:
 • Overwrites existing report
 
 .OUTPUTS
-PSCustomObject with properties:
+PSCustomObject
 
-Timestamp           
-Computer            
-Online              
-WinRM               
-Reported            
-Volume              
-Protected           
-Percent             
-MachineKeyCount     
-ADKeyCount          
-ADVerified          
-ADRecoveryKeyID     
-ADRecoveryKeyPasswor
-LocalKeySource      
-RecoveryKeyID       
-RecoveryPassword    
-TPMPresent          
-TPMReady            
-CanEnableBitLocker  
-ActivatedBitlocker
-Error
-
+Properties:
+• Timestamp
+• Computer
+• Online
+• WinRM
+• Reported
+• Volume
+• Protected
+• Percent
+• MachineKeyCount
+• ADKeyCount
+• ADVerified
+• ADRecoveryKeyID
+• ADRecoveryKeyPassword
+• LocalKeySource
+• RecoveryKeyID
+• RecoveryPassword
+• TPMPresent
+• TPMReady
+• CanEnableBitLocker
+• ActivatedBitlocker
+• Error
 
 .NOTES
 Author: Bill Galway
@@ -172,7 +177,11 @@ Supports:
 • -Confirm
 • Parallel execution with ForEach-Object -Parallel
 • Safe CSV export
+
+.LINK
+https://learn.microsoft.com/en-us/powershell/module/bitlocker/
 #>
+
 function Invoke-BitlockerTool {
 	[CmdletBinding(SupportsShouldProcess=$true)]
     param(
