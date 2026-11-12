@@ -89,9 +89,39 @@ Examples:
 | `-MaxOfflineAttempts` | `10` | Offline attempts before a computer is given up on. |
 | `-ResetAttempts` | off | Retry computers that hit their attempt limit. |
 | `-KeepInstallerLog` | off | Keep a password-redacted copy of each target's setup log (see Security). |
+| `-Upgrade` | off | Reinstall computers whose installed agent is older than the installer (see Upgrading). |
+| `-TargetVersion` | from installer | Version to compare against in `-Upgrade` mode, e.g. `3.0.1`. |
 | `-Installer` | `OCSInventory-Agent-Setup-3.0.0.exe` | Installer file name or path. |
 | `-ServerUrl` | `https://ocs.nmhschool.org` | OCS server URL. |
 | `-Username` | `ocsclient` | Account the agent uses to talk to the server. |
+
+### Upgrading an installed agent
+
+By default a computer that already has the agent service running is recorded as `AlreadyInstalled` and left alone. To roll out a newer agent, put the new installer next to the script and add `-Upgrade`:
+
+```powershell
+# Preview what would be upgraded
+.\Deploy-OCS3.ps1 -All -Upgrade -ListOnly
+
+# Upgrade, using the new installer
+.\Deploy-OCS3.ps1 -All -Upgrade -Installer OCSInventory-Agent-Setup-3.0.1.exe -TargetVersion 3.0.1
+```
+
+How it works:
+
+1. The target version comes from `-TargetVersion`, or else from the installer's file properties. If neither gives a version, the script stops and asks for `-TargetVersion`.
+2. For each computer with the agent service present, it finds the service's executable, reads its file version over the admin share and compares.
+3. Older than the target: the installer runs again, over the top of the existing install (the setup replaces the previous version and rewrites `config.json` from the parameters passed; inventory data is kept, per the OCS docs). The result is `Upgraded`.
+4. Same or newer: nothing is installed. A stopped service is started.
+5. Computers recorded as done are re-checked on later runs until their recorded version reaches the target, so a rollout can be run repeatedly as machines come online.
+
+Safeguards:
+
+- If the installed version can't be read, the computer is recorded as `VersionUnknown` and **not** touched. Use `-Force` to reinstall it anyway.
+- If the installer runs but the agent's version still isn't at the target afterwards, the result is `UpgradeNotConfirmed`. It counts toward `-MaxAttempts`, so a version-number mismatch can't cause endless reinstalls.
+- `-Force` ignores versions and reinstalls every selected computer.
+
+The script logs the version it finds on each computer. **On your first upgrade run, check a few computers' logged versions against the version you expect**, because the check reads the agent executable's file version and that may not match the installer's version number exactly.
 
 ### Password
 
@@ -103,12 +133,15 @@ The password is not stored in the script. Resolution order:
 
 ## Tracking: how "install once" works
 
-Results are stored in `OCS-Deployed.csv` (next to the script) and saved after every computer, so an interruption loses nothing. Columns: `ComputerName, Status, Reason, Attempts, ExitCode, LastAttempt, Installer, Server`.
+Results are stored in `OCS-Deployed.csv` (next to the script) and saved after every computer, so an interruption loses nothing. Columns: `ComputerName, Status, Reason, Attempts, ExitCode, LastAttempt, Installer, Server, Version`.
 
 | Status | Meaning | Retried on later runs? |
 |---|---|---|
 | `Success` | Installed and service running | No |
 | `AlreadyInstalled` | Agent service was already present (and running or started) | No |
+| `Upgraded` | `-Upgrade` replaced an older agent and it is running at the target version | No |
+| `VersionUnknown` | `-Upgrade` couldn't read the installed version, so nothing was changed | Yes, up to `-MaxAttempts` |
+| `UpgradeNotConfirmed` | Installer ran but the agent's version is still below the target | Yes, up to `-MaxAttempts` |
 | `Offline` | No ping reply | Yes, up to `-MaxOfflineAttempts` |
 | `AccessDenied` | `ADMIN$` or the service manager wasn't reachable | Yes, up to `-MaxAttempts` |
 | `InstallerFailed` | PsExec or installer returned an error | Yes, up to `-MaxAttempts` |
@@ -174,4 +207,5 @@ Because of the tracking file, each run only touches computers that aren't done y
 - **Legacy agents:** the script does not detect, remove or manage the old OCS 2.x agent. Version 3 runs alongside it, and handling 2.x is planned for a later stage.
 - **Interrupting a run (Ctrl+C):** installs already in progress on targets finish, but aren't written to the tracking file. The next run's existing-agent check records them as `AlreadyInstalled`.
 - **Server load:** `/NOW=1` makes each machine send an inventory right after install. Lower `-ThrottleLimit` if the OCS server struggles.
-- Not yet implemented: post-install verification against the OCS server, upgrading older agent versions, and a lock to prevent two overlapping scheduled runs.
+- **Version detection (`-Upgrade`):** it reads the file version of the agent service's executable. If the agent runs through a wrapper or its file version doesn't follow the installer's version number, use `-TargetVersion` and check the logged versions on a few machines first.
+- Not yet implemented: post-install verification against the OCS server and a lock to prevent two overlapping scheduled runs.
