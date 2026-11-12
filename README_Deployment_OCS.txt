@@ -128,8 +128,8 @@ The script logs the version it finds on each computer. **On your first upgrade r
 The password is not stored in the script. Resolution order:
 
 1. `-Password` (a SecureString), if given.
-2. `-PasswordFile`, if the file exists. It is a DPAPI-encrypted file that only the **same Windows user on the same machine** that created it can read.
-3. A prompt. If `-PasswordFile` was given but doesn't exist yet, the answer is saved there for next time.
+2. `-PasswordFile`, if the file exists. It is a DPAPI-encrypted file that only the **same Windows user on the same machine** that created it can read. See "Running unattended" for how to create it.
+3. A prompt. If `-PasswordFile` was given but doesn't exist yet, the answer is saved there for next time. This only happens on a run that reaches the install step (there must be computers to install on).
 
 ## Tracking: how "install once" works
 
@@ -169,8 +169,10 @@ Each run ends with a tally by outcome and a "Needs attention" list. To get it by
 Create the credential file once, **while logged in as the account the scheduled task will run under**:
 
 ```powershell
-.\Deploy-OCS3.ps1 -Name "NOSUCHPC" -PasswordFile C:\Deploy\ocs.cred   # prompts for the password and saves it
+Read-Host "ocsclient password" -AsSecureString | Export-Clixml -Path C:\Deploy\ocs.cred
 ```
+
+Check it with `Import-Clixml C:\Deploy\ocs.cred` (it should print a `SecureString`, not the password). To sign in as the task account without logging off, use `runas /user:DOMAIN\taskaccount pwsh.exe` and run the command in that window. Run the same command again to change the password.
 
 Then schedule the task (Task Scheduler, PowerShell 7, `pwsh.exe`):
 
