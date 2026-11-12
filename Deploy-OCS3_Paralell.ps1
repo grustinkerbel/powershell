@@ -27,6 +27,14 @@
       writes the log and the state file, so neither can be corrupted. Each
       computer's log lines appear together when that computer finishes.
 
+    UPGRADES
+      -Upgrade compares each installed agent's version with the installer's
+      version and re-runs the installer only where the installed agent is older.
+      Up-to-date computers are left alone, and computers recorded as done are
+      re-checked until they reach the target version. The installer's version is
+      read from its file properties, or set it yourself with -TargetVersion.
+      -Force still reinstalls everything regardless of version.
+
     TRACKING AND RETRIES
       Results are stored in a state CSV. Computers that are done (Success or
       AlreadyInstalled) are skipped on later runs. Failures are retried until
@@ -81,6 +89,8 @@ param (
     [int]$MaxOfflineAttempts = 10,   # offline attempts before giving up
     [switch]$ResetAttempts,          # ignore attempt limits this run
     [switch]$KeepInstallerLog,       # keep a password-redacted copy of each target's setup log
+    [switch]$Upgrade,                # reinstall computers whose installed agent is older than the installer
+    [string]$TargetVersion,          # version to compare against (default: read from the installer file)
 
     # --- Files ---
     [string]$StateFile = (Join-Path $PSScriptRoot "OCS-Deployed.csv"),
@@ -93,7 +103,7 @@ param (
     [string]$MailFrom
 )
 
-$script:DoneStatuses = @("Success", "AlreadyInstalled")
+$script:DoneStatuses = @("Success", "AlreadyInstalled", "Upgraded")
 $script:AgentService = "OCSInventory Agent"
 $script:RunStart     = Get-Date
 
@@ -119,7 +129,7 @@ function Write-Log {
 # State tracking (CSV: one row per computer, latest result wins; main thread only)
 # ----------------------------------------------------------------------------
 function New-StateRow {
-    param($ComputerName, $Status, $Reason, [int]$Attempts, $ExitCode, $LastAttempt, $Installer, $Server)
+    param($ComputerName, $Status, $Reason, [int]$Attempts, $ExitCode, $LastAttempt, $Installer, $Server, $Version)
     [pscustomobject]@{
         ComputerName = $ComputerName
         Status       = $Status
@@ -129,6 +139,7 @@ function New-StateRow {
         LastAttempt  = $LastAttempt
         Installer    = $Installer
         Server       = $Server
+        Version      = $Version
     }
 }
 
@@ -141,7 +152,8 @@ function Get-State {
                 $state[$row.ComputerName.ToUpper()] = New-StateRow `
                     -ComputerName $row.ComputerName -Status $row.Status -Reason $row.Reason `
                     -Attempts ([int]$row.Attempts) -ExitCode $row.ExitCode `
-                    -LastAttempt $row.LastAttempt -Installer $row.Installer -Server $row.Server
+                    -LastAttempt $row.LastAttempt -Installer $row.Installer -Server $row.Server `
+                    -Version $row.Version
             }
         }
         catch { Write-Log "Could not read state file ${StateFile}: $_" "ERROR" }
@@ -279,15 +291,48 @@ function Start-RemoteService {
     return (Get-RemoteServiceState -ComputerName $ComputerName -ServiceName $ServiceName)
 }
 
+function ConvertTo-AgentVersion {
+    # "3.0.0", "3.0.0.0" and "v3.0.0 (build 1)" all become a 4-part [version]
+    # so they compare correctly. Returns $null if no version number is found.
+    param([string]$Text)
+    if (-not $Text -or $Text -notmatch '\d+(\.\d+){0,3}') { return $null }
+    $parts = @($Matches[0].Split('.') | ForEach-Object { [int]$_ })
+    while ($parts.Count -lt 4) { $parts += 0 }
+    try { return [version]($parts -join '.') } catch { return $null }
+}
+
+function Get-RemoteAgentVersion {
+    # Finds the agent service's executable on the target and reads its file
+    # version over the admin share. Returns "" if it can't be determined.
+    param([string]$ComputerName, [string]$ServiceName)
+    try {
+        $qc = (& sc.exe "\\$ComputerName" qc $ServiceName 2>&1 | Out-String)
+        if ($qc -notmatch '(?m)BINARY_PATH_NAME\s*:\s*(.+?)\s*$') { return "" }
+        $path = $Matches[1].Trim()
+        if     ($path -match '^"([^"]+)"')  { $exe = $Matches[1] }
+        elseif ($path -match '^(.+?\.exe)') { $exe = $Matches[1] }
+        else   { return "" }
+        if ($exe -notmatch '^([A-Za-z]):\\(.*)$') { return "" }
+        $unc = "\\$ComputerName\$($Matches[1])`$\$($Matches[2])"
+        $vi  = (Get-Item -LiteralPath $unc -ErrorAction Stop).VersionInfo
+        foreach ($candidate in $vi.ProductVersion, $vi.FileVersion) {
+            if ($candidate -and (ConvertTo-AgentVersion $candidate)) { return $candidate }
+        }
+    }
+    catch { }
+    return ""
+}
+
 function New-InstallResult {
-    param([string]$Status, [string]$Reason = "", $ExitCode = "", [bool]$CountAttempt = $true, $Messages = @())
+    param([string]$Status, [string]$Reason = "", $ExitCode = "", [bool]$CountAttempt = $true, $Messages = @(), [string]$Version = "")
     [pscustomobject]@{
         Status       = $Status
         Reason       = $Reason
         ExitCode     = $ExitCode
-        Done         = ($Status -in @("Success", "AlreadyInstalled"))
+        Done         = ($Status -in @("Success", "AlreadyInstalled", "Upgraded"))
         CountAttempt = $CountAttempt
         Messages     = @($Messages)
+        Version      = $Version
     }
 }
 
@@ -340,16 +385,39 @@ function Install-OcsAgent {
     if ($agent -eq "Unknown") {
         & $say "WARN" "Could not determine whether the agent is installed on $ComputerName; continuing."
     }
-    if (-not $Options.Force) {
+    # Installed version, and (in -Upgrade mode) whether it is older than the installer
+    $installedVersion = ""
+    $needsUpgrade     = $false
+    if ($agent -in @("Running", "Stopped")) {
+        $installedVersion = Get-RemoteAgentVersion -ComputerName $ComputerName -ServiceName $Options.AgentService
+        if ($installedVersion) { & $say "INFO" "$ComputerName has agent version $installedVersion installed." }
+    }
+    if ($Options.Upgrade -and -not $Options.Force -and $agent -in @("Running", "Stopped")) {
+        $target  = ConvertTo-AgentVersion $Options.TargetVersion
+        $current = ConvertTo-AgentVersion $installedVersion
+        if (-not $current) {
+            & $say "ERROR" "Could not read the installed agent version on $ComputerName, so cannot tell whether it needs upgrading (use -Force to reinstall regardless)."
+            return New-InstallResult -Status "VersionUnknown" -Reason "Could not read installed agent version" -Messages $log.ToArray()
+        }
+        if ($current -lt $target) {
+            $needsUpgrade = $true
+            & $say "INFO" "$ComputerName agent $installedVersion is older than $target; upgrading."
+        }
+        else {
+            & $say "INFO" "$ComputerName agent $installedVersion is up to date (target $target)."
+        }
+    }
+
+    if (-not $Options.Force -and -not $needsUpgrade) {
         if ($agent -eq "Running") {
             & $say "OK" "$ComputerName already has the OCS agent service running. Recording as AlreadyInstalled."
-            return New-InstallResult -Status "AlreadyInstalled" -Reason "Service already running" -CountAttempt $false -Messages $log.ToArray()
+            return New-InstallResult -Status "AlreadyInstalled" -Reason "Service already running" -CountAttempt $false -Version $installedVersion -Messages $log.ToArray()
         }
         if ($agent -eq "Stopped") {
             & $say "WARN" "$ComputerName has the OCS agent service but it is stopped. Trying to start it..."
             if ((Start-RemoteService -ComputerName $ComputerName -ServiceName $Options.AgentService) -eq "Running") {
                 & $say "OK" "Service started on $ComputerName."
-                return New-InstallResult -Status "AlreadyInstalled" -Reason "Service was stopped; started it" -CountAttempt $false -Messages $log.ToArray()
+                return New-InstallResult -Status "AlreadyInstalled" -Reason "Service was stopped; started it" -CountAttempt $false -Version $installedVersion -Messages $log.ToArray()
             }
             & $say "WARN" "Could not start the existing service on $ComputerName; reinstalling."
         }
@@ -397,8 +465,21 @@ function Install-OcsAgent {
         $state = Start-RemoteService -ComputerName $ComputerName -ServiceName $Options.AgentService
     }
     if ($state -eq "Running") {
+        $newVersion = Get-RemoteAgentVersion -ComputerName $ComputerName -ServiceName $Options.AgentService
+        if ($needsUpgrade) {
+            $newParsed = ConvertTo-AgentVersion $newVersion
+            $target    = ConvertTo-AgentVersion $Options.TargetVersion
+            if ($newParsed -and $newParsed -lt $target) {
+                # Guards against reinstalling forever if the agent's file version
+                # never reaches the installer's version number.
+                & $say "ERROR" "Installer ran on $ComputerName but the agent is still version $newVersion (target $target)."
+                return New-InstallResult -Status "UpgradeNotConfirmed" -Reason "Still $newVersion after install, target $target" -ExitCode 0 -Version $newVersion -Messages $log.ToArray()
+            }
+            & $say "OK" "Upgraded $ComputerName from $installedVersion to $newVersion and service is running."
+            return New-InstallResult -Status "Upgraded" -Reason "From $installedVersion to $newVersion" -ExitCode 0 -Version $newVersion -Messages $log.ToArray()
+        }
         & $say "OK" "Installed on $ComputerName and service is running."
-        return New-InstallResult -Status "Success" -ExitCode 0 -Messages $log.ToArray()
+        return New-InstallResult -Status "Success" -ExitCode 0 -Version $newVersion -Messages $log.ToArray()
     }
 
     & $say "ERROR" "Installer exited 0 on $ComputerName but the service is not running (state: $state)."
@@ -420,7 +501,7 @@ function Write-Summary {
         [void]$lines.Add(("  {0,-18} {1}" -f $g.Name, $g.Count))
     }
 
-    $problems = @($Results | Where-Object { $_.Outcome -notin @("Success", "AlreadyInstalled", "PreviouslyDone") })
+    $problems = @($Results | Where-Object { $_.Outcome -notin @("Success", "AlreadyInstalled", "Upgraded", "PreviouslyDone") })
     if ($problems.Count) {
         [void]$lines.Add("Needs attention:")
         foreach ($p in $problems) {
@@ -443,7 +524,7 @@ function Write-Summary {
     if ($SmtpServer -and $MailTo -and $MailFrom) {
         try {
             $subject = "OCS deployment: {0} installed, {1} need attention" -f `
-                @($Results | Where-Object { $_.Outcome -eq "Success" }).Count, $problems.Count
+                @($Results | Where-Object { $_.Outcome -in @("Success", "Upgraded") }).Count, $problems.Count
             Send-MailMessage -SmtpServer $SmtpServer -From $MailFrom -To $MailTo `
                 -Subject $subject -Body ($lines -join "`r`n") -WarningAction SilentlyContinue -ErrorAction Stop
             Write-Log "Summary e-mailed to $MailTo"
@@ -460,19 +541,46 @@ Write-Log "==== Deploy-OCS3 started by $env:USERNAME on $env:COMPUTERNAME ===="
 # Pre-flight checks
 $script:PsExec = Join-Path $PSScriptRoot "psexec.exe"
 if (-not (Test-Path $script:PsExec)) { $script:PsExec = "psexec.exe" }
+# Look for the installer in the current folder, then next to the script
+if (-not (Test-Path $Installer)) {
+    $alt = Join-Path $PSScriptRoot $Installer
+    if (Test-Path $alt) { $Installer = $alt }
+}
+if (Test-Path $Installer) { $Installer = (Resolve-Path $Installer).Path }
+
 if (-not $ListOnly) {
     if (-not (Get-Command $script:PsExec -ErrorAction SilentlyContinue)) {
         Write-Log "psexec.exe not found next to the script or in PATH." "ERROR"; exit 1
     }
-    # Look for the installer in the current folder, then next to the script
-    if (-not (Test-Path $Installer)) {
-        $alt = Join-Path $PSScriptRoot $Installer
-        if (Test-Path $alt) { $Installer = $alt }
-    }
     if (-not (Test-Path $Installer)) {
         Write-Log "Installer not found: $Installer" "ERROR"; exit 1
     }
-    $Installer = (Resolve-Path $Installer).Path
+}
+
+# Upgrade mode: work out which version the installer represents
+$script:TargetVer = $null
+if ($Upgrade) {
+    $source = ""
+    if ($TargetVersion) {
+        $script:TargetVer = ConvertTo-AgentVersion $TargetVersion
+        $source = "-TargetVersion"
+    }
+    elseif (Test-Path $Installer) {
+        $vi = (Get-Item $Installer).VersionInfo
+        foreach ($candidate in $vi.ProductVersion, $vi.FileVersion) {
+            $v = ConvertTo-AgentVersion $candidate
+            if ($v -and $v -gt [version]"0.0.0.0") { $script:TargetVer = $v; $source = "installer file properties"; break }
+        }
+    }
+    if ($script:TargetVer) {
+        Write-Log "Upgrade mode: computers with an agent older than $($script:TargetVer) will be upgraded (version from $source)."
+    }
+    elseif ($ListOnly) {
+        Write-Log "Upgrade mode: could not determine the installer version; every computer would be checked. Use -TargetVersion." "WARN"
+    }
+    else {
+        Write-Log "Upgrade mode needs a target version but none could be read from the installer. Pass -TargetVersion, for example -TargetVersion 3.0.1" "ERROR"; exit 1
+    }
 }
 
 # If no selection was given, ask for a name/pattern
@@ -497,8 +605,16 @@ if (-not $Force) {
         $row = $state[$key]
 
         if ($row -and ($script:DoneStatuses -contains $row.Status)) {
-            [void]$results.Add([pscustomobject]@{ Computer = $t.Name; Outcome = "PreviouslyDone"; Reason = $row.Status; ExitCode = "" })
-            continue
+            # In upgrade mode a done computer is only skipped if its recorded version is already current
+            $upToDate = $true
+            if ($Upgrade) {
+                $recorded = ConvertTo-AgentVersion $row.Version
+                $upToDate = [bool]($recorded -and $script:TargetVer -and $recorded -ge $script:TargetVer)
+            }
+            if ($upToDate) {
+                [void]$results.Add([pscustomobject]@{ Computer = $t.Name; Outcome = "PreviouslyDone"; Reason = $row.Status; ExitCode = "" })
+                continue
+            }
         }
         if ($row -and -not $ResetAttempts) {
             $limit = if ($row.Status -eq "Offline") { $MaxOfflineAttempts } else { $MaxAttempts }
@@ -557,12 +673,14 @@ $options = @{
     AgentService     = $script:AgentService
     Force            = [bool]$Force
     KeepInstallerLog = [bool]$KeepInstallerLog
+    Upgrade          = [bool]$Upgrade
+    TargetVersion    = $(if ($script:TargetVer) { $script:TargetVer.ToString() } else { "" })
     InstallerLogDir  = (Join-Path $PSScriptRoot "InstallerLogs")
 }
 
 # Worker functions are handed to each runspace as text and recreated there
 $workerFunctions = @{}
-foreach ($fn in "Get-RemoteServiceState", "Start-RemoteService", "New-InstallResult", "Save-InstallerLog", "Install-OcsAgent") {
+foreach ($fn in "Get-RemoteServiceState", "Start-RemoteService", "ConvertTo-AgentVersion", "Get-RemoteAgentVersion", "New-InstallResult", "Save-InstallerLog", "Install-OcsAgent") {
     $workerFunctions[$fn] = (Get-Command $fn -CommandType Function).Definition
 }
 
@@ -600,10 +718,13 @@ $targets |
         $previous = if ($state.ContainsKey($key)) { $state[$key].Attempts } else { 0 }
         $attempts = if ($result.Done) { 0 } elseif ($result.CountAttempt) { $previous + 1 } else { $previous }
 
+        # Keep the last known version if this attempt couldn't read one (e.g. offline)
+        $version = if ($result.Version) { $result.Version } elseif ($state.ContainsKey($key)) { $state[$key].Version } else { "" }
+
         $state[$key] = New-StateRow -ComputerName $t.Name -Status $result.Status -Reason $result.Reason `
             -Attempts $attempts -ExitCode $result.ExitCode `
             -LastAttempt (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") `
-            -Installer (Split-Path $Installer -Leaf) -Server $ServerUrl
+            -Installer (Split-Path $Installer -Leaf) -Server $ServerUrl -Version $version
         Save-State -State $state    # saved after every host so a crash loses nothing
 
         [void]$results.Add([pscustomobject]@{
@@ -613,6 +734,6 @@ $targets |
 $options.Password = $null
 Write-Summary -Results $results
 
-$failed = @($results | Where-Object { $_.Outcome -notin @("Success", "AlreadyInstalled", "PreviouslyDone", "GaveUp") }).Count
+$failed = @($results | Where-Object { $_.Outcome -notin @("Success", "AlreadyInstalled", "Upgraded", "PreviouslyDone", "GaveUp") }).Count
 Write-Log "==== Finished. State file: $StateFile ===="
 if ($failed) { exit 2 }
