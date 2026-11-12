@@ -61,6 +61,7 @@ Different filters combine with **AND**. Multiple values inside one filter combin
 | `-MinOsBuild` | Minimum Windows build number. `22000` means Windows 11 and later. |
 | `-All` | Every computer, with no name or OS filter. |
 | `-Exclude` | Name(s) or wildcards that are never touched. Also applies to `-ComputerList`. |
+| `-ExcludeFile` | Text file of names or wildcards to never touch, one per line (blank lines and `#` comments ignored). Combined with `-Exclude`. The script refuses to run if the file is given but missing. Best for scheduled tasks. |
 | `-SearchBase` | Limit the search to an OU (distinguished name). |
 | `-ComputerList` | Read names from a text file (one per line, `#` for comments) instead of querying AD. AD filters, server and inactivity checks don't apply, but `-Exclude` still does. |
 | `-IncludeDisabled` | Include disabled computer accounts (ignored by default). |
@@ -178,6 +179,15 @@ Then schedule the task (Task Scheduler, PowerShell 7, `pwsh.exe`):
 
 ```powershell
 pwsh.exe -File C:\Deploy\Deploy-OCS3.ps1 -All -Yes -PasswordFile C:\Deploy\ocs.cred -SmtpServer mail.example.org -MailFrom ocs@example.org -MailTo you@example.org
+```
+
+For exclusions, add `-ExcludeFile C:\Deploy\exclude.txt` to the task instead of a list on the command line. The file is read on every run, so you can edit it without touching the task. Example `exclude.txt`:
+
+```
+# Never touch these
+KIOSK*
+SERVER-*
+SEC-PC12
 ```
 
 Because of the tracking file, each run only touches computers that aren't done yet, so machines that were off get picked up on a later run.
