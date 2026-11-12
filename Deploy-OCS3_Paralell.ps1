@@ -12,6 +12,10 @@
       -MinOsBuild       Minimum Windows build number (22000 = Windows 11 and up)
       -All              Every computer (no name/OS filter)
       -Exclude          Name(s)/wildcards that must never be touched
+      -ExcludeFile      Text file of names/wildcards to never touch, one per line
+                        (blank lines and lines starting with # are ignored).
+                        Combined with -Exclude. The script refuses to run if the
+                        file is given but missing.
       -SearchBase       Limit the AD search to an OU
       -ComputerList     Text file of names instead of querying AD
 
@@ -74,6 +78,7 @@ param (
     [int]$MinOsBuild,
     [switch]$All,
     [string[]]$Exclude,
+    [string]$ExcludeFile,    # text file of names/wildcards to never touch, one per line (# for comments)
     [string]$SearchBase,
     [switch]$IncludeDisabled,
     [switch]$IncludeServers,
@@ -588,6 +593,19 @@ if (-not ($Name -or $OperatingSystem -or $MinOsBuild -or $All -or $ComputerList)
     $answer = Read-Host "Enter a computer name or pattern (e.g. SEC*), or press Enter to cancel"
     if (-not $answer) { Write-Log "No targets selected. Exiting." "WARN"; exit 0 }
     $Name = @($answer)
+}
+
+# Merge patterns from the exclusion file into -Exclude
+if ($ExcludeFile) {
+    if (-not (Test-Path $ExcludeFile)) {
+        Write-Log "Exclusion file not found: $ExcludeFile. Refusing to continue without it so excluded computers are not touched by mistake." "ERROR"
+        exit 1
+    }
+    $fromFile = @(Get-Content $ExcludeFile |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -and -not $_.StartsWith("#") })
+    $Exclude = @(@($Exclude) + $fromFile | Where-Object { $_ } | Select-Object -Unique)
+    Write-Log "Loaded $($fromFile.Count) exclusion pattern(s) from ${ExcludeFile}: $($fromFile -join ', ')"
 }
 
 $targets = Get-TargetComputers
