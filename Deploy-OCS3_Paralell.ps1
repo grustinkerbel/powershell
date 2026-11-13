@@ -752,6 +752,7 @@ $targets |
 $options.Password = $null
 Write-Summary -Results $results
 
-$failed = @($results | Where-Object { $_.Outcome -notin @("Success", "AlreadyInstalled", "Upgraded", "PreviouslyDone", "GaveUp") }).Count
+# Offline computers are retried on later runs, so they don't make the run "fail"
+$failed = @($results | Where-Object { $_.Outcome -notin @("Success", "AlreadyInstalled", "Upgraded", "PreviouslyDone", "GaveUp", "Offline") }).Count
 Write-Log "==== Finished. State file: $StateFile ===="
 if ($failed) { exit 2 }
